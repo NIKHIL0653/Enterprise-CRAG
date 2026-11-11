@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WorkspaceRAG</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'Roboto', 'sans-serif'],
+            mono: ['"Geist Mono"', '"SF Mono"', 'Menlo', 'monospace'],
+          },
+          colors: {
+            neutral: {
+              950: '#0a0a0a',
+              925: '#111111',
+              900: '#171717',
+              850: '#1c1c1c',
+              800: '#262626',
+              700: '#404040',
+              600: '#525252',
+              500: '#737373',
+              400: '#a3a3a3',
+              300: '#d4d4d4',
+              200: '#e5e5e5',
+              100: '#f5f5f5',
+            }
+          },
+          animation: {
+            'fade-in': 'fadeIn 0.2s ease-out',
+            'slide-up': 'slideUp 0.25s ease-out',
+            'blink': 'blink 1s step-end infinite',
+          },
+          keyframes: {
+            fadeIn: { from: { opacity: 0 }, to: { opacity: 1 } },
+            slideUp: { from: { opacity: 0, transform: 'translateY(6px)' }, to: { opacity: 1, transform: 'translateY(0)' } },
+            blink: { '0%, 100%': { opacity: 1 }, '50%': { opacity: 0 } },
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    * { box-sizing: border-box; }
+    body { background: #0a0a0a; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #262626; border-radius: 2px; }
+
+    /* Prose for markdown */
+    .prose { color: #d4d4d4; font-size: 0.875rem; line-height: 1.65; }
+    .prose p { margin-bottom: 0.6rem; }
+    .prose p:last-child { margin-bottom: 0; }
+    .prose strong { color: #f5f5f5; font-weight: 600; }
+    .prose code { background: #262626; color: #a3a3a3; padding: 0.1rem 0.35rem; border-radius: 3px; font-size: 0.8rem; font-family: 'SF Mono', Menlo, monospace; }
+    .prose pre { background: #171717; border: 1px solid #262626; border-radius: 6px; padding: 0.75rem 1rem; overflow-x: auto; margin: 0.5rem 0; }
+    .prose pre code { background: none; padding: 0; }
+    .prose ul { list-style: none; margin: 0.4rem 0; padding: 0; }
+    .prose ul li { padding-left: 1rem; position: relative; margin-bottom: 0.25rem; }
+    .prose ul li::before { content: '—'; position: absolute; left: 0; color: #404040; }
+    .prose ol { list-style: decimal; padding-left: 1.25rem; margin: 0.4rem 0; }
+    .prose ol li { margin-bottom: 0.25rem; }
+    .prose h1, .prose h2, .prose h3 { color: #f5f5f5; font-weight: 600; margin: 0.75rem 0 0.35rem; }
+    .prose h1 { font-size: 1rem; }
+    .prose h2 { font-size: 0.925rem; }
+    .prose h3 { font-size: 0.875rem; }
+    .prose blockquote { border-left: 2px solid #262626; padding-left: 0.75rem; color: #737373; margin: 0.5rem 0; }
+
+    /* Input auto-resize */
+    #queryInput { min-height: 44px; max-height: 180px; }
+
+    /* Cursor blink */
+    .cursor-blink::after { content: '|'; animation: blink 1s step-end infinite; color: #525252; margin-left: 1px; }
+
+    /* Citation card */
+    .citation-card { transition: border-color 0.15s, background 0.15s; }
+    .citation-card:hover { border-color: #404040; background: #1c1c1c; }
+
+    /* Telemetry badge */
+    .telemetry-badge { font-variant-numeric: tabular-nums; }
+
+    /* Drawer overlay */
+    #drawerOverlay { transition: opacity 0.2s ease; }
+    #docDrawer { transition: transform 0.25s cubic-bezier(0.4,0,0.2,1); }
+    #docDrawer.open { transform: translateX(0); }
+
+    /* Spinner */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { animation: spin 0.8s linear infinite; }
+
+    /* Prompt chips hover */
+    .prompt-chip { transition: background 0.1s, border-color 0.1s; }
+    .prompt-chip:hover { background: #1c1c1c; border-color: #404040; }
+    .prompt-chip:active { background: #262626; }
+  </style>
+</head>
+<body class="text-neutral-300 flex flex-col h-screen overflow-hidden font-sans antialiased">
+
+  <!-- ═══ HEADER ══════════════════════════════════════════════════════════ -->
+  <header class="border-b border-neutral-800 bg-neutral-925 px-5 h-12 flex items-center justify-between flex-shrink-0">
+    <div class="flex items-center gap-3">
+      <div class="w-6 h-6 rounded bg-neutral-200 flex items-center justify-center">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <rect x="1" y="1" width="5" height="5" rx="1" fill="#0a0a0a"/>
+          <rect x="8" y="1" width="5" height="5" rx="1" fill="#0a0a0a"/>
+          <rect x="1" y="8" width="5" height="5" rx="1" fill="#0a0a0a"/>
+          <rect x="8" y="8" width="5" height="5" rx="1" fill="#0a0a0a"/>
+        </svg>
+      </div>
+      <span class="text-sm font-semibold text-neutral-100 tracking-tight">WorkspaceRAG</span>
+      <span class="text-xs text-neutral-600 font-mono">v1.0</span>
+    </div>
+
+    <div class="flex items-center gap-2 text-xs">
+      <!-- User email -->
+      <div class="flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-neutral-800 bg-neutral-900 text-neutral-400 hover:border-neutral-700 transition-colors">
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="6" cy="4" r="2.5"/>
+          <path d="M1 10c0-2.2 2.2-4 5-4s5 1.8 5 4" stroke-linecap="round"/>
+        </svg>
+        <input id="userEmail" type="email" value="rag-bot@personal-portfolio-471613.iam.gserviceaccount.com"
+          class="bg-transparent border-none text-neutral-300 focus:outline-none w-48 font-mono text-xs placeholder-neutral-600"
+          placeholder="rag-bot@..." />
+      </div>
+
+      <!-- Sync -->
+      <button id="syncBtn" onclick="triggerSync()"
+        class="flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-neutral-800 bg-neutral-900 text-neutral-400 hover:text-neutral-200 hover:border-neutral-700 transition-colors">
+        <svg id="syncIcon" width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M10 6a4 4 0 1 1-1.5-3.1" stroke-linecap="round"/>
+          <polyline points="10 2 10 6 6 6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span id="syncText">Sync</span>
+      </button>
+
+      <!-- Doc count pill -->
+      <div id="statusPill" class="flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-neutral-800 bg-neutral-900 text-neutral-500">
+        <span class="w-1.5 h-1.5 rounded-full bg-neutral-600" id="statusDot"></span>
+        <span id="statusText" class="font-mono">—</span>
+      </div>
+
+      <!-- Docs drawer trigger -->
+      <button onclick="openDrawer()"
+        class="flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-neutral-800 bg-neutral-900 text-neutral-400 hover:text-neutral-200 hover:border-neutral-700 transition-colors">
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M2 2h8M2 6h8M2 10h5" stroke-linecap="round"/>
+        </svg>
+        <span>Docs</span>
+      </button>
+
+      <a href="/docs" target="_blank"
+        class="flex items-center h-7 px-2.5 rounded-md border border-neutral-800 bg-neutral-900 text-neutral-500 hover:text-neutral-300 hover:border-neutral-700 transition-colors">
+        API
+      </a>
+    </div>
+  </header>
+
+  <!-- ═══ MAIN ═════════════════════════════════════════════════════════════ -->
+  <main id="chatContainer" class="flex-1 overflow-y-auto px-4 py-5 space-y-5" style="max-width: 760px; margin: 0 auto; width: 100%;">
+
+    <!-- Informative top note & prompt starters -->
+    <div id="welcomeCard" class="space-y-4 pt-2">
+      <div class="border border-neutral-800 rounded-lg px-4 py-3 bg-neutral-900/50 text-neutral-400 text-xs leading-relaxed">
+        Connected to Google Workspace. Ask questions across your synced documents with verified citations and semantic caching.
+      </div>
+
+      <!-- Prompt starters -->
+      <div class="flex flex-wrap gap-2 pt-1">
+        <button onclick="usePrompt('What is Scaled Dot-Product Attention?')" class="prompt-chip text-xs px-3 py-1.5 rounded-md border border-neutral-800 bg-neutral-900 text-neutral-400 cursor-pointer">
+          What is Scaled Dot-Product Attention?
+        </button>
+        <button onclick="usePrompt('Explain Multi-Head Attention and its purpose')" class="prompt-chip text-xs px-3 py-1.5 rounded-md border border-neutral-800 bg-neutral-900 text-neutral-400 cursor-pointer">
+          Explain Multi-Head Attention
+        </button>
+        <button onclick="usePrompt('What are the training details and optimizer settings?')" class="prompt-chip text-xs px-3 py-1.5 rounded-md border border-neutral-800 bg-neutral-900 text-neutral-400 cursor-pointer">
+          Training details and optimizer settings
+        </button>
+        <button onclick="usePrompt('What is the Transformer model architecture?')" class="prompt-chip text-xs px-3 py-1.5 rounded-md border border-neutral-800 bg-neutral-900 text-neutral-400 cursor-pointer">
+          Transformer model architecture
+        </button>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ═══ INPUT FOOTER ═══════════════════════════════════════════════════ -->
+  <footer class="border-t border-neutral-800 bg-neutral-925 px-4 py-3 flex-shrink-0">
+    <div style="max-width: 760px; margin: 0 auto; width: 100%;">
+      <div class="relative flex items-end gap-2">
+        <textarea
+          id="queryInput"
+          rows="1"
+          placeholder="Ask anything about your documents..."
+          class="flex-1 bg-neutral-900 text-neutral-200 placeholder-neutral-700 rounded-lg px-3.5 py-2.5 border border-neutral-800 focus:outline-none focus:border-neutral-600 text-sm resize-none font-sans leading-relaxed transition-colors"
+          onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();handleSend();}"
+          oninput="autoResize(this)"
+        ></textarea>
+        <button id="sendBtn" onclick="handleSend()"
+          class="flex-shrink-0 h-9 px-4 rounded-lg bg-neutral-200 hover:bg-neutral-100 disabled:opacity-30 disabled:cursor-not-allowed text-neutral-900 text-xs font-semibold transition-colors">
+          Send
+        </button>
+      </div>
+      <div class="flex items-center justify-between mt-2 px-0.5">
+        <span class="text-[11px] text-neutral-700 font-mono">Gemini · pgvector · Langfuse</span>
+        <span class="text-[11px] text-neutral-700">Shift+Enter for newline</span>
+      </div>
+    </div>
+  </footer>
+
+  <!-- ═══ DOCUMENT INSPECTOR DRAWER ══════════════════════════════════════ -->
+  <div id="drawerOverlay" class="fixed inset-0 bg-black/50 opacity-0 pointer-events-none z-40" onclick="closeDrawer()"></div>
+  <aside id="docDrawer" class="fixed top-0 right-0 h-full w-80 bg-neutral-925 border-l border-neutral-800 z-50 flex flex-col"
+    style="transform: translateX(100%);">
+    <div class="flex items-center justify-between px-4 h-12 border-b border-neutral-800 flex-shrink-0">
+      <span class="text-sm font-medium text-neutral-200">Indexed Documents</span>
+      <button onclick="closeDrawer()" class="text-neutral-600 hover:text-neutral-300 transition-colors">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M12 4L4 12M4 4l8 8" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+    <div id="drawerContent" class="flex-1 overflow-y-auto p-4 space-y-3 text-xs text-neutral-400">
+      <div class="text-neutral-600">Loading documents...</div>
+    </div>
+    <div class="px-4 py-3 border-t border-neutral-800 flex-shrink-0">
+      <div id="drawerStats" class="text-xs text-neutral-600 font-mono">—</div>
+    </div>
+  </aside>
+
+  <!-- ═══ SCRIPT ═══════════════════════════════════════════════════════════ -->
+  <script>
+    // ── State ──────────────────────────────────────────────────────────────
+    const chatContainer = document.getElementById('chatContainer');
+    const queryInput    = document.getElementById('queryInput');
+    const userEmailEl   = document.getElementById('userEmail');
+    const sendBtn       = document.getElementById('sendBtn');
+    const statusText    = document.getElementById('statusText');
+    const statusDot     = document.getElementById('statusDot');
+
+    // Restore saved email
+    const savedEmail = localStorage.getItem('wrag_user');
+    if (savedEmail) userEmailEl.value = savedEmail;
+    userEmailEl.addEventListener('change', () => localStorage.setItem('wrag_user', userEmailEl.value));
+
+    // ── Auto-resize textarea ───────────────────────────────────────────────
+    function autoResize(el) {
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 180) + 'px';
+    }
+
+    // ── Status check ──────────────────────────────────────────────────────
+    async function checkStatus() {
+      try {
+        const res = await fetch('/api/v1/sync/status');
+        if (res.ok) {
+          const d = await res.json();
+          const docs = d.total_documents || 0;
+          const chunks = d.total_chunks || 0;
+          statusText.textContent = `${docs}d · ${chunks}c`;
+          statusDot.className = docs > 0
+            ? 'w-1.5 h-1.5 rounded-full bg-emerald-500'
+            : 'w-1.5 h-1.5 rounded-full bg-neutral-600';
+        }
+      } catch (_) {
+        statusText.textContent = '—';
+      }
+    }
+    checkStatus();
+    setInterval(checkStatus, 30000);
+
+    // ── Sync ─────────────────────────────────────────────────────────────
+    async function triggerSync() {
+      const syncBtn = document.getElementById('syncBtn');
+      const syncIcon = document.getElementById('syncIcon');
+      syncBtn.disabled = true;
+      document.getElementById('syncText').textContent = 'Syncing';
+      syncIcon.classList.add('spin');
+
+      try {
+        const res = await fetch('/api/v1/sync/full', { method: 'POST' });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || d.detail || 'Sync failed');
+        document.getElementById('syncText').textContent = 'Sync';
+        addSystemMessage(`Sync complete — ${d.processed} document(s) indexed, ${d.failed} failed. Duration: ${d.duration_seconds}s.`);
+        checkStatus();
+      } catch (err) {
+        addSystemMessage(`Sync failed: ${err.message}`);
+        document.getElementById('syncText').textContent = 'Sync';
+      } finally {
+        syncIcon.classList.remove('spin');
+        syncBtn.disabled = false;
+      }
+    }
+
+    // ── Prompt chip ───────────────────────────────────────────────────────
+    function usePrompt(text) {
+      queryInput.value = text;
+      autoResize(queryInput);
+      queryInput.focus();
+    }
+
+    // ── Message rendering ─────────────────────────────────────────────────
+    function addMessage(role, content = '') {
+      const isUser = role === 'user';
+      const wrapper = document.createElement('div');
+      wrapper.className = `flex flex-col gap-1.5 animate-slide-up ${isUser ? 'items-end' : 'items-start'}`;
+
+      const bubble = document.createElement('div');
+
+      if (isUser) {
+        bubble.className = 'max-w-lg px-3.5 py-2.5 rounded-xl bg-neutral-800 text-neutral-200 text-sm leading-relaxed';
+        bubble.textContent = content;
+      } else {
+        bubble.className = 'max-w-2xl w-full';
+        const contentEl = document.createElement('div');
+        contentEl.className = 'prose';
+        bubble.appendChild(contentEl);
+        bubble._contentEl = contentEl;
+      }
+
+      wrapper.appendChild(bubble);
+      chatContainer.appendChild(wrapper);
+      chatContainer.scrollTop = chatContainer.scrollHeight;
+      return bubble;
+    }
+
+    function addSystemMessage(text) {
+      const el = document.createElement('div');
+      el.className = 'text-xs text-neutral-600 text-center py-1 font-mono animate-fade-in';
+      el.textContent = text;
+      chatContainer.appendChild(el);
+      chatContainer.scrollTop = chatContainer.scrollHeight;
+    }
+
+    // ── Telemetry badge ───────────────────────────────────────────────────
+    function renderTelemetry(bubble, meta) {
+      const latency  = meta.latency_ms;
+      const cacheHit = meta.cache_hit;
+      const saved    = meta.tokens_saved || 0;
+
+      const badge = document.createElement('div');
+      badge.className = 'telemetry-badge flex items-center gap-3 mt-2.5 text-[11px] text-neutral-600 font-mono';
+
+      let parts = [];
+      if (latency !== undefined) parts.push(`${latency}ms`);
+      if (cacheHit === 'exact')    parts.push('exact cache hit');
+      else if (cacheHit === 'semantic') parts.push('semantic cache hit');
+      else if (cacheHit === null && latency > 0) parts.push('live');
+      if (saved > 0) parts.push(`~${saved} tokens saved`);
+
+      badge.textContent = parts.join(' · ');
+      bubble.appendChild(badge);
+    }
+
+    // ── Citation cards ────────────────────────────────────────────────────
+    function renderCitations(bubble, citations) {
+      if (!citations || citations.length === 0) return;
+
+      const section = document.createElement('div');
+      section.className = 'mt-3 space-y-1.5';
+
+      const label = document.createElement('div');
+      label.className = 'text-[11px] text-neutral-600 font-mono uppercase tracking-wider mb-2';
+      label.textContent = 'Sources';
+      section.appendChild(label);
+
+      citations.forEach(c => {
+        const card = document.createElement('a');
+        card.href = c.source_url || '#';
+        card.target = '_blank';
+        card.rel = 'noopener noreferrer';
+        card.className = 'citation-card flex items-start gap-2.5 p-2.5 rounded-lg border border-neutral-800 bg-neutral-925 no-underline block';
+
+        const icon = document.createElement('div');
+        icon.className = 'flex-shrink-0 w-5 h-5 mt-0.5 rounded bg-neutral-800 flex items-center justify-center';
+        icon.innerHTML = `<svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="#737373" stroke-width="1.5"><path d="M2 10V2h6l2 2v6H2z" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 2v2h2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+        const info = document.createElement('div');
+        info.className = 'flex-1 min-w-0';
+
+        const title = document.createElement('div');
+        title.className = 'text-xs text-neutral-300 truncate leading-tight';
+        title.textContent = c.doc_title || 'Document';
+
+        const excerpt = document.createElement('div');
+        excerpt.className = 'text-xs text-neutral-600 mt-0.5 line-clamp-2 leading-relaxed';
+        excerpt.textContent = c.excerpt || '';
+
+        info.appendChild(title);
+        if (c.section_header) {
+          const sec = document.createElement('div');
+          sec.className = 'text-[11px] text-neutral-700 font-mono mt-0.5';
+          sec.textContent = c.section_header;
+          info.appendChild(sec);
+        }
+        info.appendChild(excerpt);
+
+        card.appendChild(icon);
+        card.appendChild(info);
+        section.appendChild(card);
+      });
+
+      bubble.appendChild(section);
+    }
+
+    // ── Copy button ───────────────────────────────────────────────────────
+    function addCopyButton(bubble, text) {
+      const btn = document.createElement('button');
+      btn.className = 'mt-2 text-[11px] text-neutral-700 hover:text-neutral-400 font-mono transition-colors flex items-center gap-1';
+      btn.innerHTML = `<svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="4" width="7" height="7" rx="1.5"/><path d="M4 4V2.5A1.5 1.5 0 0 1 5.5 1h5A1.5 1.5 0 0 1 12 2.5v5A1.5 1.5 0 0 1 10.5 9H9" stroke-linecap="round"/></svg> Copy`;
+      btn.onclick = async () => {
+        await navigator.clipboard.writeText(text);
+        btn.textContent = 'Copied';
+        setTimeout(() => { btn.innerHTML = `<svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="4" width="7" height="7" rx="1.5"/><path d="M4 4V2.5A1.5 1.5 0 0 1 5.5 1h5A1.5 1.5 0 0 1 12 2.5v5A1.5 1.5 0 0 1 10.5 9H9" stroke-linecap="round"/></svg> Copy`; }, 2000);
+      };
+      bubble.appendChild(btn);
+    }
+
+    // ── Send handler ──────────────────────────────────────────────────────
+    async function handleSend() {
+      const question = queryInput.value.trim();
+      if (!question || sendBtn.disabled) return;
+
+      const userEmail = userEmailEl.value.trim() || 'user@domain.com';
+
+      // Hide welcome card on first message
+      const wc = document.getElementById('welcomeCard');
+      if (wc) wc.remove();
+
+      // User bubble
+      addMessage('user', question);
+      queryInput.value = '';
+      queryInput.style.height = 'auto';
+      sendBtn.disabled = true;
+
+      // Assistant bubble
+      const asBubble = addMessage('assistant', '');
+      const contentEl = asBubble._contentEl;
+      contentEl.classList.add('cursor-blink');
+
+      let fullAnswer = '';
+      let metaPayload = null;
+
+      try {
+        const res = await fetch('/api/v1/query/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            question,
+            user_email: userEmail,
+            session_id: 'web-' + Date.now(),
+          }),
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          contentEl.classList.remove('cursor-blink');
+          contentEl.innerHTML = `<span style="color:#737373">${err.detail || err.error || 'Request failed.'}</span>`;
+          return;
+        }
+
+        const reader  = res.body.getReader();
+        const decoder = new TextDecoder();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const raw = decoder.decode(value, { stream: true });
+          const lines = raw.split('\n');
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const data = line.slice(6).trim();
+            if (!data) continue;
+            if (data === '[DONE]') continue;
+
+            // Check if JSON payload (meta frame)
+            try {
+              const parsed = JSON.parse(data);
+              if ('citations' in parsed || 'cache_hit' in parsed) {
+                metaPayload = parsed;
+                continue;
+              }
+            } catch (_) {}
+
+            // Token
+            fullAnswer += data + ' ';
+            contentEl.innerHTML = marked.parse(fullAnswer.trim());
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+          }
+        }
+
+      } catch (err) {
+        contentEl.innerHTML = `<span style="color:#737373">Connection error: ${err.message}</span>`;
+      } finally {
+        contentEl.classList.remove('cursor-blink');
+        sendBtn.disabled = false;
+
+        if (metaPayload) {
+          if (metaPayload.citations?.length) renderCitations(asBubble, metaPayload.citations);
+          renderTelemetry(asBubble, metaPayload);
+        }
+        if (fullAnswer.trim()) addCopyButton(asBubble, fullAnswer.trim());
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+      }
+    }
+
+    // ── Document Inspector Drawer ──────────────────────────────────────────
+    async function openDrawer() {
+      const overlay = document.getElementById('drawerOverlay');
+      const drawer  = document.getElementById('docDrawer');
+      overlay.style.opacity = '1';
+      overlay.style.pointerEvents = 'auto';
+      drawer.classList.add('open');
+      await loadDrawerContent();
+    }
+
+    function closeDrawer() {
+      const overlay = document.getElementById('drawerOverlay');
+      const drawer  = document.getElementById('docDrawer');
+      overlay.style.opacity = '0';
+      overlay.style.pointerEvents = 'none';
+      drawer.classList.remove('open');
+    }
+
+    async function loadDrawerContent() {
+      const content = document.getElementById('drawerContent');
+      const stats   = document.getElementById('drawerStats');
+      content.innerHTML = '<div class="text-neutral-700">Loading...</div>';
+
+      try {
+        const res = await fetch('/api/v1/sync/status');
+        if (!res.ok) throw new Error('Failed to load');
+        const d = await res.json();
+
+        stats.textContent = `${d.total_documents} docs · ${d.total_chunks} chunks`;
+
+        const lastSync = d.last_sync_at
+          ? new Date(d.last_sync_at).toLocaleString()
+          : 'Never';
+
+        content.innerHTML = '';
+
+        // Last sync row
+        const row = document.createElement('div');
+        row.className = 'text-neutral-600 font-mono text-[11px] mb-3';
+        row.textContent = `Last sync: ${lastSync}`;
+        content.appendChild(row);
+
+        if (d.total_documents === 0) {
+          content.innerHTML += '<div class="text-neutral-700">No documents indexed. Use Sync to index your Drive folder.</div>';
+          return;
+        }
+
+        // Placeholder doc list (we show aggregate info since detailed doc list needs an extra endpoint)
+        const card = document.createElement('div');
+        card.className = 'p-3 rounded-lg border border-neutral-800 bg-neutral-900 space-y-2';
+        card.innerHTML = `
+          <div class="flex items-center justify-between">
+            <span class="text-neutral-300 font-medium">Documents</span>
+            <span class="text-neutral-600 font-mono">${d.total_documents}</span>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-neutral-500">Chunks indexed</span>
+            <span class="text-neutral-600 font-mono">${d.total_chunks}</span>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-neutral-500">Avg chunks/doc</span>
+            <span class="text-neutral-600 font-mono">${d.total_documents > 0 ? Math.round(d.total_chunks / d.total_documents) : 0}</span>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-neutral-500">Embedding model</span>
+            <span class="text-neutral-600 font-mono text-[11px]">gemini-embedding-001</span>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-neutral-500">Vector dims</span>
+            <span class="text-neutral-600 font-mono">768</span>
+          </div>
+        `;
+        content.appendChild(card);
+
+        // Pipeline info
+        const info = document.createElement('div');
+        info.className = 'mt-3 space-y-1.5 text-[11px] text-neutral-600';
+        [
+          ['Retrieval', 'Dense pgvector + BM25 · RRF fusion'],
+          ['Reranking', 'Cohere rerank-v3.5'],
+          ['Generation', 'Gemini 3.5 Flash Lite'],
+          ['Caching', 'SHA-256 exact + pgvector semantic'],
+          ['Tracing', 'Langfuse (every query)'],
+        ].forEach(([k, v]) => {
+          const r = document.createElement('div');
+          r.className = 'flex justify-between gap-2';
+          r.innerHTML = `<span class="text-neutral-700">${k}</span><span class="text-right">${v}</span>`;
+          info.appendChild(r);
+        });
+        content.appendChild(info);
+
+      } catch (err) {
+        content.innerHTML = `<div class="text-neutral-700">${err.message}</div>`;
+      }
+    }
+  </script>
+</body>
+</html>

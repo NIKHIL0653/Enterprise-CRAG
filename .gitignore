@@ -1,0 +1,51 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment files (NEVER commit secrets)
+.env
+.env.local
+.env.production
+!.env.example
+!.env.test
+
+# Google Service Account credentials (NEVER commit)
+credentials/
+*.json
+!pyproject.toml
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Docker
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Langfuse local data
+langfuse_data/
+
+# Ragas cache
+.ragas_cache/

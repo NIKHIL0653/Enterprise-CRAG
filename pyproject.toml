@@ -1,0 +1,52 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+src = ["backend"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes (unused imports, undefined variables)
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+]
+ignore = [
+    "E501",  # Line too long (handled gracefully, prompts & docstrings often exceed)
+    "B008",  # Do not perform function call in argument defaults (FastAPI Depends)
+    "B905",  # zip() without an explicit strict= parameter
+    "S101",  # Use of `assert` detected (fine in tests)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"backend/tests/**" = ["S101"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["backend"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+exclude = ["backend/tests/"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["."]
+testpaths = ["backend/tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["backend"]
+omit = ["backend/tests/*", "backend/evals/*"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 60
