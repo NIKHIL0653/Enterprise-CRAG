@@ -12,71 +12,80 @@ Knowledge RAG is a production-grade, Corrective Retrieval-Augmented Generation (
 
 ## Architecture Overview
 
-```
-                                 ┌────────────────────────────────────────────────────────┐
-                                 │                   Google Workspace                     │
-                                 │       Google Drive API · Service Account Auth         │
-                                 └───────────────────────────┬────────────────────────────┘
-                                                             │
-                                                             ▼
-                                 ┌────────────────────────────────────────────────────────┐
-                                 │             Real-Time Ingestion Pipeline               │
-                                 │  • Document Fetcher (Docs, PDFs, Markdown, Text)       │
-                                 │  • Semantic Chunker (512 tokens, 50-token overlap)     │
-                                 │  • ACL Extractor (allowed_emails, allowed_domain)      │
-                                 │  • Gemini Embedding API (768-dimensional vectors)      │
-                                 └───────────────────────────┬────────────────────────────┘
-                                                             │
-                                                             ▼
-                                 ┌────────────────────────────────────────────────────────┐
-                                 │        PostgreSQL + pgvector Vector Storage            │
-                                 │  • document_chunks (vector index + GIN trgm full-text) │
-                                 │  • rag_query_cache (SHA-256 hash + cosine index)       │
-                                 │  • Row-Level Document ACL Enforcement                  │
-                                 └───────────────────────────┬────────────────────────────┘
-                                                             │
-                                                             ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                         Multi-Tier Query & Agent Pipeline                                               │
-│                                                                                                                         │
-│  User Query ──► [Tier 1: Canonical Exact Hash] ──────────────────────(Hit: < 2ms)──────────────────────────┐            │
-│                     │ (Miss)                                                                               │            │
-│                     ▼                                                                                      │            │
-│                 [Tier 2: pgvector Semantic Cache] ───────────────────(Hit: ~400ms)─────────────────────────┤            │
-│                     │ (Miss)                                                                               │            │
-│                     ▼                                                                                      │            │
-│                 Intent Route (Fast-path bypass for conversational queries)                                 │            │
-│                     │                                                                                      │            │
-│                     ▼                                                                                      │            │
-│                 Hybrid Retrieval (Dense 768d vector + BM25 trigram full-text with RRF fusion)              │            │
-│                     │                                                                                      │            │
-│                     ▼                                                                                      │            │
-│                 Cohere Cross-Encoder Reranker (rerank-v3.5, surfaces top-5 high-signal chunks)             │            │
-│                     │                                                                                      │            │
-│                     ▼                                                                                      │            │
-│                 Parallel CRAG Relevance Grader (asyncio.gather concurrent chunk verification)               │            │
-│                     │                                                                                      │            │
-│          ┌──────────┴──────────┐                                                                           │            │
-│          ▼                     ▼                                                                           │            │
-│     [Relevant]          [Not Relevant] ──► Safe Fallback ("Insufficient documentation")                    │            │
-│          │                                                                                                 │            │
-│          ▼                                                                                                 │            │
-│     Answer Generation (Gemini 3.5 Flash Lite)                                                              │            │
-│          │                                                                                                 │            │
-│          ▼                                                                                                 │            │
-│     Faithfulness Verifier ───────(Hallucination Detected)──► Safe Fallback                                 │            │
-│          │                                                                                                 │            │
-│          ▼ (Faithful)                                                                                      │            │
-│     Store in Cache ────────────────────────────────────────────────────────────────────────────────────────┼────────────┤
-│                                                                                                            │            │
-└────────────────────────────────────────────────────────────────────────────────────────────────────────────┼────────────┘
-                                                                                                             │
-                                                                                                             ▼
-                                                                                             Streamlit Web Application
-                                                                                             • Real-time token streaming
-                                                                                             • Clean text & math normalization
-                                                                                             • Clickable Drive source citations
-                                                                                             • Memory / Document Inspector
+```mermaid
+flowchart TD
+    %% Custom Styling
+    classDef input fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0f172a;
+    classDef cache fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#0f172a;
+    classDef agent fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#0f172a;
+    classDef db fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#0f172a;
+    classDef ext fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#0f172a;
+
+    subgraph INGESTION [" Google Workspace Ingestion Pipeline "]
+        GDrive["Google Drive API<br/>(Service Account Auth)"]:::ext
+        Sync["Sync Manager<br/>(Incremental SHA-256)"]
+        Chunker["Semantic Chunker<br/>(512 tok / 64 overlap)"]
+        Embedder["Gemini Embedder<br/>(gemini-embedding-001)"]
+        
+        GDrive -->|Poll changes| Sync
+        Sync -->|Extract text and ACLs| Chunker
+        Chunker -->|768d vectors| Embedder
+    end
+
+    subgraph STORAGE [" PostgreSQL 16 + pgvector Database "]
+        PGChunks[("document_chunks<br/>• ivfflat (cosine distance)<br/>• GIN tsvector (BM25 fulltext)<br/>• Row-level ACL security")]:::db
+        PGCache[("rag_query_cache<br/>• B-Tree exact hash index<br/>• ivfflat cosine distance index")]:::db
+    end
+
+    Embedder -->|Upsert Chunks| PGChunks
+    Sync -.->|Invalidate on Edit| PGCache
+
+    subgraph CACHE_TIER [" Two-Tier Intelligent Caching "]
+        UserQuery["User Query<br/>(Streamlit / REST API)"]:::input
+        T1{"Tier-1: Canonical Exact<br/>SHA-256 Hash"}:::cache
+        T2{"Tier-2: Semantic Cache<br/>pgvector cosine <= 0.16"}:::cache
+        
+        UserQuery --> T1
+        T1 -->|HIT: < 2ms| FastAnswer["Return Cached Answer<br/>(0 API calls)"]
+        T1 -->|MISS| T2
+        T2 -->|HIT: ~380ms| FastAnswer
+    end
+
+    subgraph CRAG_AGENT [" LangGraph Corrective RAG (CRAG) Workflow "]
+        Intent{"Intent Router<br/>Conversational?"}
+        ConvBypass["Instant Chat Reply<br/>(Bypass Retrieval)"]
+        
+        T2 -->|MISS| Intent
+        Intent -->|Yes| ConvBypass
+        Intent -->|No| Hybrid["Hybrid Retrieval<br/>Dense + BM25 (RRF k=60)"]:::agent
+        
+        Hybrid <-->|Filtered Query| PGChunks
+        
+        Rerank["Cohere Cross-Encoder<br/>(rerank-v3.5: top-15 -> top-5)"]:::agent
+        Hybrid -->|Top-15 Candidates| Rerank
+        
+        Grading["Concurrent Relevance Grader<br/>(asyncio.gather / Gemini Flash)"]:::agent
+        Rerank -->|Top-5 Chunks| Grading
+        
+        RelCheck{"Any Chunk<br/>Score >= 0.5?"}
+        Grading --> RelCheck
+        
+        Fallback["Safe Fallback Node<br/>('Insufficient documentation')"]:::ext
+        RelCheck -->|No| Fallback
+        
+        Generate["Grounded Answer Generation<br/>(Gemini 3.5 Flash-Lite)"]:::agent
+        RelCheck -->|Yes| Generate
+        
+        Faithful{"Faithfulness Guard<br/>Self-Reflection Audit"}:::agent
+        Generate --> Faithful
+        
+        Faithful -->|Pass| FinalOut["Stream Response (SSE)<br/>+ Populate Caches"]:::input
+        Faithful -->|Hallucination Detected| Fallback
+    end
+
+    FinalOut -.->|Write-through Cache| PGCache
+    FinalOut --> Streamlit["Streamlit Web UI<br/>(Clean Prose + Sources Panel)"]:::input
+    FinalOut -.-> Langfuse["Langfuse v5 Cloud<br/>(Distributed OTel Traces)"]:::ext
 ```
 
 ---
