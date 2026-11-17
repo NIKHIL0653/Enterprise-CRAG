@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import time
 import urllib.error
@@ -141,7 +142,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-API_BASE = "http://localhost:8000"
+API_BASE = os.getenv("API_BASE", "http://localhost:8000")
 
 
 def check_backend_online() -> bool:

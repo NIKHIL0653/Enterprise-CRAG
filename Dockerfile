@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # ── Application source ────────────────────────────────────────────
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
+COPY streamlit_app.py ./streamlit_app.py
 
 # ── Non-root user for security ────────────────────────────────────
 RUN useradd --create-home --shell /bin/bash appuser && \
