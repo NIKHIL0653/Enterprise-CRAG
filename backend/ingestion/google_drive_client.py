@@ -28,6 +28,8 @@ _SUPPORTED_MIMES = {
     "application/pdf",
     "text/plain",
     "text/markdown",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
 }
 
 
@@ -304,8 +306,39 @@ class GoogleDriveClient:
                     _, done = downloader.next_chunk()
                 fh.seek(0)
                 reader = PdfReader(fh)
-                pages = [page.extract_text() or "" for page in reader.pages]
+                pages = []
+                for i, page in enumerate(reader.pages):
+                    page_text = (page.extract_text() or "").strip()
+                    if page_text:
+                        pages.append(f"## Page {i + 1}\n\n{page_text}")
                 return "\n\n".join(pages)
+            elif mime_type in (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/msword",
+            ):
+                import io
+                import xml.etree.ElementTree as ET
+                import zipfile
+
+                from googleapiclient.http import MediaIoBaseDownload
+
+                req = self._drive.files().get_media(fileId=file_id)
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, req)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+                fh.seek(0)
+                with zipfile.ZipFile(fh) as z:
+                    xml_content = z.read("word/document.xml")
+                tree = ET.fromstring(xml_content)
+                namespaces = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+                paragraphs = []
+                for p in tree.iterfind(".//w:p", namespaces):
+                    texts = [node.text for node in p.iterfind(".//w:t", namespaces) if node.text]
+                    if texts:
+                        paragraphs.append("".join(texts))
+                return "\n\n".join(paragraphs)
             else:
                 raw = self._drive.files().get_media(fileId=file_id).execute()
                 return raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
