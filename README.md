@@ -201,6 +201,11 @@ Every query execution creates a distributed trace in Langfuse capturing:
 - **Full Parity Two-Tier Caching**: Persists exact SHA-256 canonical matches (<2ms) and semantic vector matches ($\le 0.16$ distance) locally, with cascade cache invalidation on file uploads.
 - **Instant Local Boot**: Enables running `python -m uvicorn backend.main:app` out-of-the-box with zero Docker or cloud database setup.
 
+### 12. Metadata-Filtered Self-Querying & Predicate Pushdown
+- **Natural Language Filter Extraction**: In `intent_route_node`, the query parser identifies format constraints (`pdf`, `csv`, `excel`, `word`, `google doc`) and scopes them into structured filter objects (`filters={"mime_type": "application/pdf"}`).
+- **SQL & FTS5 Predicate Pushdown**: Pushes metadata filters directly down into the database (`WHERE d.mime_type = $X`) before vector distance computation and BM25 rank calculations across both PostgreSQL and SQLite stores.
+- **High-Precision Retrieval**: Prevents irrelevant document types from crowding the top-$k$ retrieval candidate set.
+
 ---
 
 ## Technical Specifications
