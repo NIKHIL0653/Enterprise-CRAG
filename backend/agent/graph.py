@@ -163,8 +163,13 @@ class WorkspaceRAGGraph:
             langfuse_client=self._langfuse,
         )
 
+        bound_intent_route = functools.partial(
+            intent_route_node,
+            llm_client=self._llm_client,
+        )
+
         # Register nodes.
-        graph.add_node("intent_route", intent_route_node)
+        graph.add_node("intent_route", bound_intent_route)
         graph.add_node("retrieve", bound_retrieve)
         graph.add_node("grade_relevance", bound_grade_relevance)
         graph.add_node("generate", bound_generate)
@@ -207,6 +212,7 @@ class WorkspaceRAGGraph:
         question: str,
         user_email: str,
         session_id: str,
+        history: list[dict[str, str]] | list[Any] | None = None,
     ) -> RAGState:
         """Execute the RAG pipeline for a single question.
 
@@ -219,6 +225,7 @@ class WorkspaceRAGGraph:
             user_email: Email address of the requesting user (access control).
             session_id: Session or conversation identifier used for grouping
                 traces in Langfuse.
+            history: Optional prior conversation turns for resolving context.
 
         Returns:
             Final ``RAGState`` dict containing ``answer``, ``citations``,
@@ -242,9 +249,19 @@ class WorkspaceRAGGraph:
         )
         run_log.info("run_start", question=question)
 
+        serialised_history: list[dict[str, str]] = []
+        if history:
+            for item in history:
+                if hasattr(item, "model_dump"):
+                    serialised_history.append(item.model_dump())
+                elif isinstance(item, dict):
+                    serialised_history.append(item)
+
         initial_state: RAGState = {
             "question": question,
+            "standalone_question": question,
             "user_email": user_email,
+            "history": serialised_history,
             "retrieved_docs": [],
             "relevant_docs": [],
             "answer": "",

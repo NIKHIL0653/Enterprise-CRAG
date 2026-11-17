@@ -17,16 +17,25 @@ Symbols exported:
 from __future__ import annotations
 
 from backend.models.document import Document, DocumentChunk
-from backend.models.query import Citation, QueryRequest, QueryResponse, RAGState
+from backend.models.query import (
+    ChatMessage,
+    Citation,
+    QueryRequest,
+    QueryResponse,
+    RAGState,
+    TokenUsage,
+)
 
 __all__ = [
     # Document models
     "DocumentChunk",
     "Document",
     # Query / response models
+    "ChatMessage",
     "QueryRequest",
     "Citation",
     "QueryResponse",
+    "TokenUsage",
     # LangGraph state
     "RAGState",
 ]

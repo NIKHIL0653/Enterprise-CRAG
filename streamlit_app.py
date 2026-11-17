@@ -499,6 +499,18 @@ def _generate_mock_response(query: str) -> tuple[str, list[dict], dict]:
             }
             return answer, citations, meta
 
+    # Multi-turn contextual follow-up detection for demo mode
+    last_assistant_msg = ""
+    for m in reversed(st.session_state.messages):
+        if m.get("role") == "assistant":
+            last_assistant_msg = m.get("content", "").lower()
+            break
+
+    is_followup = any(normalized.startswith(p) for p in [
+        "can it", "can i", "what about", "how much", "is it", "does it", "does that",
+        "why", "how does that", "where", "tell me more", "explain that", "elaborate"
+    ]) or any(p in normalized for p in [" it ", " that ", " this ", " those ", " them "])
+
     topic = "architecture"
     if any(k in normalized for k in ["remote", "work", "pto", "leave", "stipend", "policy", "benefit"]):
         topic = "remote"
@@ -506,6 +518,14 @@ def _generate_mock_response(query: str) -> tuple[str, list[dict], dict]:
         topic = "onboarding"
     elif any(k in normalized for k in ["arch", "tech", "langfuse", "rag", "crag", "rrf", "cohere", "pgvector", "cache"]):
         topic = "architecture"
+    elif is_followup and last_assistant_msg:
+        # Infer topic from antecedent dialogue turn
+        if any(k in last_assistant_msg for k in ["remote", "stipend", "pto", "leave", "home office"]):
+            topic = "remote"
+        elif any(k in last_assistant_msg for k in ["onboard", "buddy", "laptop", "setup", "first week"]):
+            topic = "onboarding"
+        else:
+            topic = "architecture"
 
     entry = _MOCK_KNOWLEDGE.get(topic, _MOCK_KNOWLEDGE["architecture"])
     answer = entry["answer"]
@@ -569,10 +589,17 @@ if prompt:
                 time.sleep(delay)
         else:
             try:
+                history_payload = [
+                    {"role": m["role"], "content": m["content"]}
+                    for m in st.session_state.messages
+                    if m.get("role") in ("user", "assistant") and m.get("content")
+                ]
+
                 req_data = json.dumps({
                     "question": prompt,
                     "user_email": user_email.strip() or "rag-bot@personal-portfolio-471613.iam.gserviceaccount.com",
-                    "session_id": "streamlit-session"
+                    "session_id": "streamlit-session",
+                    "history": history_payload,
                 }).encode("utf-8")
 
                 req = urllib.request.Request(

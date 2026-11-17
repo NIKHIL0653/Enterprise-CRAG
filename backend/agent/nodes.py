@@ -125,23 +125,30 @@ _CONVERSATIONAL_PATTERNS = re.compile(
 )
 
 
-async def intent_route_node(state: RAGState) -> dict[str, Any]:
-    """Fast-path for conversational inputs that do not require document retrieval.
+async def intent_route_node(
+    state: RAGState,
+    llm_client: Any = None,
+) -> dict[str, Any]:
+    """Fast-path for conversational inputs and query condensation for multi-turn chat.
 
-    Checks if the user's question matches common conversational patterns. If
-    so, returns a canned response immediately, bypassing retrieval and all
-    downstream LLM calls to save cost and latency.
+    1. Checks if the user's question matches common conversational patterns. If
+       so and no prior history exists, returns a canned response immediately,
+       bypassing retrieval and all downstream LLM calls to save cost and latency.
+    2. If conversation history is present, invokes Gemini to reformulate ambiguous
+       follow-ups into standalone search queries resolving pronouns and antecedents.
 
     Args:
-        state: Current RAGState containing the user's question.
+        state: Current RAGState containing the user's question and history.
+        llm_client: Optional Gemini GenerativeModel used for query reformulation.
 
     Returns:
-        Dict with ``answer``, ``citations``, ``is_relevant``, ``is_faithful``
-        pre-filled for conversational inputs, or empty dict to continue normal
-        pipeline flow.
+        Dict with state updates (pre-filled answer for greeting, or
+        ``standalone_question`` and updated ``token_usage``).
     """
     question = state.get("question", "").strip()
-    if _CONVERSATIONAL_PATTERNS.match(question):
+    history = state.get("history") or []
+
+    if not history and _CONVERSATIONAL_PATTERNS.match(question):
         log.bind(node="intent_route").info("conversational_bypass", question=question)
         return {
             "answer": (
@@ -154,7 +161,49 @@ async def intent_route_node(state: RAGState) -> dict[str, Any]:
             "retrieved_docs": [],
             "relevant_docs": [],
         }
-    return {"question": question}
+
+    standalone_question = question
+    token_usage = dict(state.get("token_usage") or {})
+
+    # If history is present, condense follow-up into a standalone search query
+    if history and llm_client:
+        history_lines: list[str] = []
+        for turn in history[-4:]:
+            role = "User" if turn.get("role") == "user" else "Assistant"
+            history_lines.append(f"{role}: {turn.get('content', '')}")
+        history_text = "\n".join(history_lines)
+
+        condense_prompt = (
+            "You are an expert search query reformulation engine for an enterprise search system.\n"
+            "Given the conversation history and a follow-up question, rewrite the follow-up question "
+            "into a complete, standalone search query that preserves all necessary context, nouns, "
+            "and entity references.\n"
+            "If the question is already complete and standalone, return it unchanged.\n"
+            "Do NOT answer the question. Output ONLY the standalone query.\n\n"
+            f"### Conversation History\n{history_text}\n\n"
+            f"### Follow-up Question\n{question}\n\n"
+            "### Standalone Query:"
+        )
+        try:
+            condensed, usage = await _gemini_generate_with_usage(llm_client, condense_prompt)
+            if condensed and len(condensed) >= 3:
+                standalone_question = condensed.strip().strip('"').strip("'")
+                log.bind(node="intent_route").info(
+                    "query_condensed",
+                    original=question,
+                    standalone=standalone_question,
+                )
+                token_usage["prompt_tokens"] = token_usage.get("prompt_tokens", 0) + usage["prompt_tokens"]
+                token_usage["completion_tokens"] = token_usage.get("completion_tokens", 0) + usage["completion_tokens"]
+                token_usage["total_tokens"] = token_usage.get("total_tokens", 0) + usage["total_tokens"]
+        except Exception as exc:
+            log.warning("query_condensation_failed", error=str(exc))
+
+    return {
+        "question": question,
+        "standalone_question": standalone_question,
+        "token_usage": token_usage,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +218,9 @@ async def retrieve_node(
 ) -> dict[str, Any]:
     """Retrieve and rerank document chunks relevant to the user question.
 
-    1. Calls ``HybridRetriever.retrieve`` with the state question and email.
-    2. Passes raw results through ``CohereReranker.rerank`` to surface the
+    1. Uses ``standalone_question`` (with antecedents resolved) if available.
+    2. Calls ``HybridRetriever.retrieve`` with the search query and email.
+    3. Passes raw results through ``CohereReranker.rerank`` to surface the
        most relevant chunks.
 
     Args:
@@ -181,17 +231,18 @@ async def retrieve_node(
     Returns:
         Dict with key ``retrieved_docs`` containing the reranked chunks.
     """
-    node_log = log.bind(node="retrieve", question=state["question"])
+    search_query = state.get("standalone_question") or state["question"]
+    node_log = log.bind(node="retrieve", question=state["question"], search_query=search_query)
     node_log.info("node_start")
 
     raw_chunks: list[DocumentChunk] = await retriever.retrieve(
-        query=state["question"],
+        query=search_query,
         user_email=state["user_email"],
         top_k=settings.TOP_K_RETRIEVAL,
     )
 
     reranked_chunks: list[DocumentChunk] = await reranker.rerank(
-        query=state["question"],
+        query=search_query,
         chunks=raw_chunks,
         top_n=settings.TOP_K_RERANK,
     )
@@ -460,8 +511,18 @@ async def generate_answer_node(
     token_usage = dict(state.get("token_usage") or {})
 
     context = _build_context(state["relevant_docs"])
+    history = state.get("history") or []
+    history_block = ""
+    if history:
+        history_lines: list[str] = []
+        for turn in history[-4:]:
+            role = "User" if turn.get("role") == "user" else "Assistant"
+            history_lines.append(f"{role}: {turn.get('content', '')}")
+        history_block = "### Prior Conversation\n" + "\n".join(history_lines) + "\n\n"
+
     full_prompt = (
         f"{_SYSTEM_PROMPT}\n\n"
+        f"{history_block}"
         f"### Context\n{context}\n\n"
         f"### Question\n{state['question']}\n\n"
         "### Answer"

@@ -118,6 +118,7 @@ async def _stream_rag_response(
         question=body.question,
         user_email=str(body.user_email),
         session_id=body.session_id or str(uuid.uuid4()),
+        history=body.history,
     )
     elapsed_ms = round((time.monotonic() - t0) * 1000)
 

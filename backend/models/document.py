@@ -23,7 +23,7 @@ Example::
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
@@ -69,8 +69,8 @@ class DocumentChunk(BaseModel):
     allowed_emails: list[str] = Field(default_factory=list)
     allowed_domain: str | None = None
     embedding: list[float] | None = None
-    created_at: datetime
-    updated_at: datetime
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     model_config = {"frozen": False}
 
