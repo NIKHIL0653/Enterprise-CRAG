@@ -90,6 +90,42 @@ flowchart TD
 
 ---
 
+## Quick Start & Local Execution
+
+### 1-Click Launch (Windows)
+Run `start.bat` or launch in PowerShell:
+```powershell
+.\start.ps1
+```
+The launcher automatically verifies/launches Docker Desktop, provisions PostgreSQL (`pgvector`) & the FastAPI backend, probes health endpoints, and opens `http://localhost:8501` in your browser.
+
+### Full Stack via Docker Compose (Cross-Platform)
+```bash
+# Launch PostgreSQL (pgvector), FastAPI API, and Streamlit UI
+docker compose up -d
+
+# Follow streaming container logs
+docker compose logs -f
+
+# Tear down containers
+docker compose down
+```
+
+### Standalone Local Development (No Docker Required)
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Run code linter and full test suite (41 tests)
+ruff check backend/ streamlit_app.py
+pytest backend/tests/ -v
+
+# 3. Launch Streamlit interface (auto-activates Offline Demo Mode if Docker is offline)
+streamlit run streamlit_app.py --server.port 8501
+```
+
+---
+
 ## Production-Grade Architecture & Features
 
 ### 1. Two-Tier Semantic Query Caching (`QueryCacheManager`)
