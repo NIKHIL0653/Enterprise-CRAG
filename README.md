@@ -136,9 +136,21 @@ Every query execution creates a distributed trace in Langfuse capturing:
 ### 7. Clean, Minimalist Streamlit Interface
 - **White Background Theme**: Clean, distraction-free styling designed for enterprise readability.
 - **Fixed Document Memory Inspector**: Anchored sidebar displays currently loaded documents, indexed chunk counts, and direct links to Google Drive.
+- **Interactive Drag-and-Drop Uploader**: Index local `.pdf`, `.docx`, `.md`, and `.txt` files directly without needing GCP credentials.
 - **Live Telemetry Badges**: Displays execution latency, token counts, and itemized USD query costs (as well as tokens and dollars saved on cache hits).
 - **Text & Citation Cleaning Engine**: Removes repetitive inline bracket clutter (`[Doc: ..., §—]`) and converts raw LaTeX artifacts into readable prose, grouping verified sources cleanly in an expandable container.
 - **Minimal Visual Feedback**: Subtle pulsing loading animation provides immediate visual feedback while the knowledge base is searched.
+
+### 8. Multi-Format Ingestion & Direct Document Ingestion
+- **PDF Page Citations**: Extracts PDF text using `pypdf` with injected `## Page N` section headers, allowing the RAG agent to cite exact page numbers in responses.
+- **Word (`.docx`) XML Parser**: Zero-dependency standard library OpenXML extraction from `word/document.xml` parsing paragraphs with complete fidelity.
+- **Direct Upload API (`POST /api/v1/sync/upload`)**: Enables instant indexing of local documents via multipart form uploads without requiring a Google Service Account.
+- **Offline Demo Mode Parity**: Automatically parses uploaded documents into memory when running offline, enabling immediate query retrieval, page citations, and cost tracking.
+
+### 9. Multi-Turn Conversational Memory & Query Condensation
+- **Antecedent & Pronoun Resolution**: When users ask conversational follow-up questions (e.g., *"Can it be used for an ergonomic desk chair?"*), the agent automatically reformulates the question into a standalone search query preserving nouns and entities.
+- **Conversational Context Injection**: The LLM prompt maintains prior dialogue history under `### Prior Conversation`, generating answers that flow naturally across multiple turns while remaining strictly grounded in retrieved citations.
+- **Typed Schema**: Supported end-to-end via `ChatMessage` models in FastAPI and LangGraph `RAGState`.
 
 ---
 
