@@ -242,3 +242,58 @@ async def upload_document(
     except Exception as exc:
         logger.error("file_upload_ingest_failed", filename=file.filename, error=str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post(
+    "/webhook",
+    summary="Google Drive push notification webhook receiver",
+    description=(
+        "Receives event-driven push notifications from Google Drive Changes API (channels.watch). "
+        "Handles initial handshake (sync state) and triggers background incremental re-indexing "
+        "and cache invalidation whenever a file is created, modified, or trashed in Drive."
+    ),
+    responses={
+        200: {"description": "Webhook received and processed"},
+    },
+)
+async def drive_webhook(request: Request) -> dict[str, Any]:
+    """Handle Google Drive push notifications."""
+    channel_id = request.headers.get("X-Goog-Channel-ID")
+    resource_state = request.headers.get("X-Goog-Resource-State")  # e.g., 'sync', 'change', 'trash', 'add'
+    message_number = request.headers.get("X-Goog-Message-Number")
+
+    log = logger.bind(
+        endpoint="drive_webhook",
+        channel_id=channel_id,
+        resource_state=resource_state,
+        message_number=message_number,
+    )
+
+    if not channel_id or not resource_state:
+        log.warning("invalid_drive_webhook_headers")
+        return {"status": "ignored", "detail": "Missing X-Goog headers"}
+
+    if resource_state == "sync":
+        # Google sends a 'sync' state upon initial channel registration handshake
+        log.info("drive_channel_subscription_verified", channel_id=channel_id)
+        return {"status": "subscribed", "channel_id": channel_id}
+
+    log.info("drive_change_notification_received", resource_state=resource_state)
+
+    # Trigger asynchronous background incremental sync & cache invalidation
+    sync_manager: SyncManager = request.app.state.sync_manager
+    try:
+        stats, _ = await sync_manager.run_incremental_sync()
+        log.info("event_driven_sync_complete", stats=stats)
+        return {
+            "status": "processed",
+            "resource_state": resource_state,
+            "stats": stats,
+        }
+    except Exception as exc:
+        log.error("event_driven_sync_failed", error=str(exc))
+        return {
+            "status": "error",
+            "resource_state": resource_state,
+            "error": str(exc),
+        }
