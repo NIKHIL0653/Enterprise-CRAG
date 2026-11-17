@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from backend.agent.nodes import generate_answer_node, intent_route_node, retrieve_node
+from backend.agent.nodes import (
+    _build_context,
+    generate_answer_node,
+    intent_route_node,
+    retrieve_node,
+)
 from backend.core.config import get_settings
 from backend.models.document import DocumentChunk
 from backend.models.query import ChatMessage, QueryRequest, RAGState
@@ -132,3 +137,59 @@ async def test_generate_answer_injects_prior_conversation() -> None:
     call_args = mock_llm.generate_content_async.call_args[0][0]
     assert "### Prior Conversation" in call_args
     assert "What is our remote work stipend?" in call_args
+
+
+def test_build_context_merges_contiguous_siblings() -> None:
+    """Ensure contiguous chunks from the same document section are smoothly concatenated."""
+    now = datetime.now(timezone.utc)
+    chunk_0 = DocumentChunk(
+        chunk_id="c_0",
+        doc_id="doc_handbook",
+        doc_title="Handbook",
+        source_url="http://handbook",
+        section_header="Benefits",
+        content="First paragraph of benefits.",
+        token_count=10,
+        chunk_index=0,
+        allowed_emails=["alice@acme.com"],
+        created_at=now,
+        updated_at=now,
+    )
+    chunk_1 = DocumentChunk(
+        chunk_id="c_1",
+        doc_id="doc_handbook",
+        doc_title="Handbook",
+        source_url="http://handbook",
+        section_header="Benefits",
+        content="Second contiguous paragraph of benefits.",
+        token_count=10,
+        chunk_index=1,
+        allowed_emails=["alice@acme.com"],
+        created_at=now,
+        updated_at=now,
+    )
+    chunk_other = DocumentChunk(
+        chunk_id="c_other",
+        doc_id="doc_security",
+        doc_title="Security",
+        source_url="http://security",
+        section_header="MFA",
+        content="MFA is mandatory for all accounts.",
+        token_count=10,
+        chunk_index=0,
+        allowed_emails=["alice@acme.com"],
+        created_at=now,
+        updated_at=now,
+    )
+
+    # Pass in reverse order to ensure sorting and contiguous stitching works
+    context = _build_context([chunk_1, chunk_other, chunk_0])
+
+    # Handbook chunks should be merged into a single block with one header
+    assert context.count("[Doc: Handbook, §Benefits]") == 1
+    assert "First paragraph of benefits.\n\nSecond contiguous paragraph of benefits." in context
+
+    # Security chunk is kept separate with ---
+    assert "[Doc: Security, §MFA]" in context
+    assert "\n\n---\n\n" in context
+

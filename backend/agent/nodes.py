@@ -409,21 +409,60 @@ _CITATION_PATTERN = re.compile(
 def _build_context(docs: list[DocumentChunk]) -> str:
     """Format relevant documents into a single context string for the LLM.
 
+    Merges contiguous sibling chunks from the same document and section to
+    prevent redundant headers and fragmented sentences across chunk boundaries.
+
     Args:
         docs: List of ``DocumentChunk`` objects to include.
 
     Returns:
-        Multi-block context string with per-chunk headers.
+        Multi-block context string with per-chunk/section headers.
     """
-    parts: list[str] = []
-    for doc in docs:
+    if not docs:
+        return ""
+
+    # Sort stably by doc_id and chunk_index to ensure sequential reading order
+    sorted_docs = sorted(docs, key=lambda d: (d.doc_id, d.chunk_index))
+    merged_blocks: list[str] = []
+    current_doc_id: str | None = None
+    current_section: str | None = None
+    current_last_index: int = -999
+    current_texts: list[str] = []
+    current_title: str = ""
+    current_url: str = ""
+
+    for doc in sorted_docs:
         section = doc.section_header or "—"
-        parts.append(
-            f"[Doc: {doc.doc_title}, §{section}]\n"
-            f"Source: {doc.source_url}\n"
-            f"{doc.content}"
+        if (
+            doc.doc_id == current_doc_id
+            and section == current_section
+            and doc.chunk_index == current_last_index + 1
+        ):
+            # Contiguous sibling chunk — append content smoothly
+            current_texts.append(doc.content)
+            current_last_index = doc.chunk_index
+        else:
+            if current_texts:
+                merged_blocks.append(
+                    f"[Doc: {current_title}, §{current_section}]\n"
+                    f"Source: {current_url}\n"
+                    + "\n\n".join(current_texts)
+                )
+            current_doc_id = doc.doc_id
+            current_title = doc.doc_title
+            current_url = doc.source_url
+            current_section = section
+            current_last_index = doc.chunk_index
+            current_texts = [doc.content]
+
+    if current_texts:
+        merged_blocks.append(
+            f"[Doc: {current_title}, §{current_section}]\n"
+            f"Source: {current_url}\n"
+            + "\n\n".join(current_texts)
         )
-    return "\n\n---\n\n".join(parts)
+
+    return "\n\n---\n\n".join(merged_blocks)
 
 
 def _parse_citations(
