@@ -20,6 +20,7 @@ ENV/
 credentials/
 *.json
 !pyproject.toml
+!railway.json
 
 # IDE
 .vscode/
