@@ -188,6 +188,13 @@ Every query execution creates a distributed trace in Langfuse capturing:
 - **Conversational Context Injection**: The LLM prompt maintains prior dialogue history under `### Prior Conversation`, generating answers that flow naturally across multiple turns while remaining strictly grounded in retrieved citations.
 - **Typed Schema**: Supported end-to-end via `ChatMessage` models in FastAPI and LangGraph `RAGState`.
 
+### 10. Automated LLM Evals Pipeline & Continuous Benchmarks
+- **Two-Tier Quality Gating**: Separates fast, deterministic, zero-cost CI unit tests (`pytest backend/tests/` running 48 tests in ~11s on every PR) from continuous live LLM evaluations.
+- **Golden Ground-Truth Benchmark (`golden_dataset.jsonl`)**: Multi-domain evaluation set spanning corporate policies, engineering standards, security protocols, and out-of-domain safe fallback defenses (*"What is the capital of Mars?"*).
+- **Automated Metric Suite (`run_benchmarks.py`)**: Computes **Faithfulness** ($\ge 80\%$) and **Answer Relevance** ($\ge 75\%$), pushes scores to **Langfuse**, and gates builds on regression.
+- **Nightly CI/CD Runner (`.github/workflows/evals-nightly.yml`)**: Automated nightly workflow with PostgreSQL 16 + `pgvector` and Redis service containers.
+- **Interactive UI Dashboard**: Embedded "Benchmark Evaluations" tab in Streamlit displaying real-time metric scoreboards, latency tracking, and query drill-downs.
+
 ---
 
 ## Technical Specifications

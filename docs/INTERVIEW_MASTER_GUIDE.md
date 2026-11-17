@@ -87,10 +87,22 @@ Here is why each core feature was introduced, what critical problem it solves, a
 
 ---
 
-### Feature 9: Multi-Format Document Ingestion & Synthetic Benchmark Generation
-* **What was introduced:** Direct multi-format file ingestion endpoint (`POST /api/v1/sync/upload`) supporting PDF, DOCX, Markdown, and plain text, coupled with an automated synthetic evaluation dataset generator (`generate_dataset.py`) and externalized JSONL benchmarking (`golden_dataset.jsonl`).
-* **Problem it solves:** Production RAG systems cannot depend solely on Google Drive sync or hardcoded evaluation questions. Organizations need to upload local handbooks and run automated benchmarks against questions that reflect their actual ingested corpus.
-* **How it helps:** Parses DOCX (via XML extraction), PDFs, and Markdown into chunked, embedded knowledge. `generate_dataset.py` samples chunks from PostgreSQL and prompts Gemini to synthesize realistic employee Q&As, exporting versioned JSONL datasets and syncing to Langfuse Datasets for continuous regression testing.
+### Feature 9: Multi-Format Document Ingestion with Page-Level Citations
+* **What was introduced:** Direct multi-format file ingestion endpoint (`POST /api/v1/sync/upload`) and zero-dependency parsers (`backend/ingestion/parsers.py`) supporting PDF (with page-level citations), DOCX (Word OpenXML paragraph and table extraction), CSV (tabular GFM conversion), Markdown, and plain text.
+* **Problem it solves:** Production RAG systems cannot depend solely on Google Drive sync. Organizations need to upload local files in varied formats without relying on heavy external microservices or binary wrappers (like Unstructured, LibreOffice, or headless Chrome) that bloat Docker images and cause native C crashes.
+* **How it helps:** Standard library `zipfile` and `xml.etree.ElementTree` extract paragraphs and tables from Word OpenXML with zero extra dependencies; `pypdf` tags pages as `## Page N` so downstream chunks inherit accurate page numbers; and CSV files are converted into structured GitHub Flavored Markdown (GFM) tables, enabling hybrid search and vector similarity over tabular metrics.
+
+---
+
+### Feature 10: Continuous LLM Evaluation Pipeline & Benchmark Dashboard
+* **What was introduced:** A complete evaluation ecosystem comprising:
+  - Curated golden dataset (`backend/evals/datasets/golden_dataset.jsonl`) with positive domain queries and negative out-of-domain safe fallbacks.
+  - Autonomous synthetic benchmark generator (`backend/evals/generate_dataset.py`) using Gemini to sample PostgreSQL chunks and synthesize ground-truth Q&A pairs.
+  - Automated benchmark runner (`backend/evals/run_benchmarks.py`) computing **Faithfulness** ($\ge 80\%$) and **Answer Relevance** ($\ge 75\%$) metrics and logging runs to Langfuse.
+  - Nightly scheduled CI/CD workflow (`.github/workflows/evals-nightly.yml`) in GitHub Actions.
+  - 1-click interactive evaluation tab in the Streamlit UI with visual metric scoreboards and query drill-downs.
+* **Problem it solves:** Prompt modifications, retriever parameter tuning, or model updates frequently cause silent quality regressions (e.g., increased hallucinations, lower recall, or answer degradation) that standard unit tests and linting cannot detect. Conversely, running full live LLM benchmarks on every commit in pull request CI is slow, cost-prohibitive, and flaky due to external API rate limits.
+* **How it helps:** Separates fast, deterministic, zero-cost CI contract testing (48 unit tests running in ~11s on PRs) from continuous nightly and on-demand LLM evaluations. Developers can run benchmarks locally or in Streamlit with 1 click, while automated nightly runs safeguard production against model and retrieval regression.
 
 ---
 
@@ -522,6 +534,24 @@ We solve this using **Conversational Query Condensation**:
 1. **PDF Page-Level Citations:** Using `pypdf.PdfReader`, each page is extracted and tagged with a Markdown header `## Page N`. When `SemanticMarkdownChunker` processes the document, each chunk inherits the page number in `section_header`, which is surfaced directly in the UI sources drawer as a page-level citation.
 2. **Word (.docx) OpenXML Parser:** A `.docx` file is a standard ZIP archive containing `word/document.xml`. We read the archive into memory using standard library `zipfile`, parse paragraph nodes (`//w:p`) and text nodes (`w:t`) via `xml.etree.ElementTree`, and assemble clean Markdown with zero third-party C-bindings or binary wrappers.
 3. **Direct Upload Endpoint:** We expose `POST /api/v1/sync/upload`, enabling instant indexing of local documents with transactional persistence and automatic cache invalidation."
+
+---
+
+#### Q20: "How do you evaluate and prevent quality regressions in a production RAG system? Why separate CI code checks from live LLM benchmarks?"
+**Answer:**
+"In enterprise RAG, code correctness (syntax, unit tests, typing) does not guarantee quality correctness (grounding, relevance, absence of hallucinations).
+
+We solve this through a two-tier evaluation architecture:
+1. **Tier 1: Fast, Free CI Quality Gate (Every PR / Push):**
+   - Runs `ruff check` and `pytest backend/tests/` (48 unit tests in ~11s).
+   - In `test_evals.py`, we validate evaluation data schemas, SSE parsing, and test scoring algorithms against mock inputs. This ensures 100% CI determinism with zero API bills and zero rate limit flakiness.
+2. **Tier 2: Continuous & On-Demand LLM Benchmarks (`backend/evals/`):**
+   - Evaluates the live system against a golden dataset (`golden_dataset.jsonl`) and synthetic test cases.
+   - Evaluates two primary RAG metrics:
+     - **Faithfulness (Context Grounding):** Measures the proportion of claims in the generated response supported by retrieved chunks ($\ge 0.80$ threshold).
+     - **Answer Relevance (Intent Fulfillment):** Measures how directly the response addresses the prompt ($\ge 0.75$ threshold).
+   - Metrics are pushed to **Langfuse** for historical trend analysis across deployments.
+   - We run this as a scheduled **Nightly GitHub Actions Workflow** (`evals-nightly.yml`) and provide a 1-click **Benchmark Evaluations tab** in the Streamlit UI for immediate developer feedback."
 
 ---
 
