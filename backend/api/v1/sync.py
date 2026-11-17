@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 import asyncpg
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 
 from backend.core.logging import get_logger
 from backend.ingestion import SyncManager
@@ -182,3 +182,46 @@ async def list_documents(request: Request) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
+
+
+@router.post(
+    "/upload",
+    summary="Upload and ingest a local document",
+    description=(
+        "Accepts a file upload (.pdf, .docx, .md, .txt), extracts its text content, "
+        "chunks it, computes vector embeddings, and stores it in PostgreSQL."
+    ),
+    responses={
+        200: {"description": "File successfully parsed and ingested"},
+        400: {"description": "Invalid file or extractable content empty"},
+        500: {"description": "Ingestion failed"},
+    },
+)
+async def upload_document(
+    request: Request,
+    file: UploadFile = File(...),
+    owner_email: str = Query(
+        default="local_user@workspace.internal",
+        description="Owner email to assign permissions to",
+    ),
+) -> dict[str, Any]:
+    """Ingest a directly uploaded file."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Uploaded file must have a filename.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    sync_manager: SyncManager = request.app.state.sync_manager
+    try:
+        result = await sync_manager.ingest_file(
+            filename=file.filename,
+            content_bytes=content,
+            owner_email=owner_email,
+            mime_type=file.content_type or "",
+        )
+        return result
+    except Exception as exc:
+        logger.error("file_upload_ingest_failed", filename=file.filename, error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

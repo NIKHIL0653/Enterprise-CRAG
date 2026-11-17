@@ -7,6 +7,7 @@ update workflows.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -17,6 +18,7 @@ from backend.core.config import get_settings
 from backend.ingestion.chunker import SemanticMarkdownChunker
 from backend.ingestion.embedder import EmbeddingError, GeminiEmbedder
 from backend.ingestion.google_drive_client import GoogleDriveClient, GoogleDriveError
+from backend.ingestion.parsers import parse_bytes_to_markdown
 from backend.models.document import Document, DocumentChunk
 
 logger: structlog.BoundLogger = structlog.get_logger(__name__)
@@ -237,6 +239,94 @@ class SyncManager:
         }
         log.info("Incremental sync complete", **stats)
         return stats, new_page_token
+
+    async def ingest_file(
+        self,
+        filename: str,
+        content_bytes: bytes,
+        owner_email: str = "workspace_user@internal.io",
+        mime_type: str = "",
+    ) -> dict[str, Any]:
+        """Ingest a directly uploaded file (PDF, DOCX, Markdown, Text).
+
+        Parses the binary content into structured Markdown, chunks it, generates
+        Gemini vector embeddings, and persists the document and chunks to PostgreSQL.
+
+        Args:
+            filename: Name of the uploaded file (e.g. 'q3_report.pdf').
+            content_bytes: Raw binary bytes of the file.
+            owner_email: Email address of the document owner.
+            mime_type: Optional MIME type string.
+
+        Returns:
+            Dictionary with indexing statistics (doc_id, title, chunks_created).
+
+        Raises:
+            SyncError: If parsing, chunking, embedding, or database persistence fails.
+        """
+        log = logger.bind(method="ingest_file", filename=filename, owner=owner_email)
+        log.info("Direct file ingestion started")
+        start_time = time.monotonic()
+
+        raw_text = parse_bytes_to_markdown(
+            content_bytes, filename=filename, mime_type=mime_type
+        )
+        if not raw_text.strip():
+            raise SyncError(f"No extractable text found in uploaded file: {filename}")
+
+        # Deterministic document identifier
+        doc_hash = hashlib.sha256(f"{filename}:{owner_email}".encode()).hexdigest()[:16]
+        doc_id = f"upload_{doc_hash}"
+        now = datetime.now(timezone.utc)
+
+        doc = Document(
+            doc_id=doc_id,
+            title=filename,
+            source_url=f"local://{filename}",
+            mime_type=mime_type or "application/octet-stream",
+            owner_email=owner_email,
+            allowed_emails=[owner_email],
+            allowed_domain="",
+            chunks=[],
+            last_modified=now,
+            synced_at=now,
+        )
+
+        try:
+            chunks = self._chunker.chunk_document(doc, raw_text)
+        except Exception as exc:
+            raise SyncError(f"Failed to chunk {filename}: {exc}", cause=exc) from exc
+
+        if not chunks:
+            raise SyncError(f"Chunker produced 0 chunks for {filename}")
+
+        try:
+            chunks = await self._embedder.embed_chunks(chunks)
+        except EmbeddingError as exc:
+            raise SyncError(f"Failed to embed chunks for {filename}: {exc}", cause=exc) from exc
+
+        doc.chunks = chunks
+
+        try:
+            await self._upsert_to_db(doc)
+        except Exception as exc:
+            raise SyncError(f"Failed to persist {filename} to database: {exc}", cause=exc) from exc
+
+        try:
+            from backend.services.cache import QueryCacheManager
+            await QueryCacheManager.invalidate_for_docs(None, self._pool)
+        except Exception as exc:
+            log.warning("cache_invalidation_failed", error=str(exc))
+
+        duration = round(time.monotonic() - start_time, 2)
+        log.info("Direct file ingestion complete", doc_id=doc_id, chunks=len(chunks), duration=duration)
+        return {
+            "status": "success",
+            "doc_id": doc_id,
+            "title": filename,
+            "chunks_created": len(chunks),
+            "duration_seconds": duration,
+        }
 
     # ------------------------------------------------------------------
     # Private pipeline helpers

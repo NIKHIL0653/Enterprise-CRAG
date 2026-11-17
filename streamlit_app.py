@@ -276,6 +276,22 @@ def fetch_documents():
     return []
 
 
+def upload_file_to_backend(filename: str, file_bytes: bytes, mime_type: str = "") -> tuple[bool, str]:
+    """Upload a local document to the FastAPI backend."""
+    try:
+        import httpx
+        url = f"{API_BASE}/api/v1/sync/upload"
+        files = {"file": (filename, file_bytes, mime_type or "application/octet-stream")}
+        with httpx.Client(timeout=60.0) as client:
+            resp = client.post(url, files=files)
+            if resp.status_code == 200:
+                data = resp.json()
+                return True, f"Indexed {data.get('chunks_created', 0)} chunks"
+            return False, f"Server responded with status {resp.status_code}: {resp.text}"
+    except Exception as exc:
+        return False, str(exc)
+
+
 def trigger_sync():
     """Trigger a full document synchronization with Google Drive."""
     try:
@@ -305,10 +321,15 @@ with st.sidebar:
             unsafe_allow_html=True
         )
 
+    if "demo_docs" not in st.session_state:
+        st.session_state.demo_docs = list(_MOCK_DOCUMENTS)
+    if "demo_uploaded_content" not in st.session_state:
+        st.session_state.demo_uploaded_content = {}
+
     st.markdown('<div class="sidebar-header">Indexed Documents</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-caption">Documents in memory available for search.</div>', unsafe_allow_html=True)
 
-    docs = fetch_documents() if backend_is_live else _MOCK_DOCUMENTS
+    docs = fetch_documents() if backend_is_live else st.session_state.demo_docs
 
     if docs:
         for doc in docs:
@@ -337,6 +358,43 @@ with st.sidebar:
                 st.rerun()
             else:
                 st.error("Sync failed.")
+
+    st.markdown('<div class="sidebar-header" style="margin-top: 10px;">Upload Document</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-caption">Upload PDF, DOCX, MD, or TXT.</div>', unsafe_allow_html=True)
+    uploaded_file = st.file_uploader(
+        "Upload document",
+        type=["pdf", "docx", "md", "txt"],
+        label_visibility="collapsed",
+    )
+    if uploaded_file is not None:
+        upload_sig = f"uploaded_{uploaded_file.name}_{uploaded_file.size}"
+        if upload_sig not in st.session_state:
+            with st.spinner(f"Indexing {uploaded_file.name}..."):
+                bytes_data = uploaded_file.getvalue()
+                if backend_is_live:
+                    ok, msg = upload_file_to_backend(uploaded_file.name, bytes_data, uploaded_file.type)
+                    if ok:
+                        st.session_state[upload_sig] = True
+                        st.success(f"Indexed {uploaded_file.name}!")
+                        st.rerun()
+                    else:
+                        st.error(f"Upload failed: {msg}")
+                else:
+                    from backend.ingestion.parsers import parse_bytes_to_markdown
+                    extracted_text = parse_bytes_to_markdown(
+                        bytes_data, filename=uploaded_file.name, mime_type=uploaded_file.type
+                    )
+                    approx_chunks = max(1, len(extracted_text) // 500)
+                    st.session_state.demo_docs.append({
+                        "doc_id": f"upload_{uploaded_file.name}",
+                        "title": uploaded_file.name,
+                        "chunk_count": approx_chunks,
+                        "source_url": "",
+                    })
+                    st.session_state.demo_uploaded_content[uploaded_file.name] = extracted_text
+                    st.session_state[upload_sig] = True
+                    st.success(f"Indexed {uploaded_file.name} ({approx_chunks} chunks)")
+                    st.rerun()
 
     st.markdown("<hr>", unsafe_allow_html=True)
     user_email = st.text_input(
@@ -411,6 +469,35 @@ def _generate_mock_response(query: str) -> tuple[str, list[dict], dict]:
 
     is_cache_hit = normalized in st.session_state.asked_queries
     st.session_state.asked_queries.add(normalized)
+
+    # Check user-uploaded files in demo mode first
+    uploaded_dict = getattr(st.session_state, "demo_uploaded_content", {})
+    query_tokens = [w for w in re.findall(r"\w+", normalized) if len(w) > 2]
+    for doc_name, doc_text in uploaded_dict.items():
+        doc_lower = doc_text.lower()
+        if any(w in doc_lower for w in query_tokens):
+            paragraphs = [p.strip() for p in doc_text.split("\n\n") if p.strip()]
+            matching_paras = [p for p in paragraphs if any(w in p.lower() for w in query_tokens)]
+            body = "\n\n".join(matching_paras[:3]) if matching_paras else (paragraphs[0] if paragraphs else "Content indexed.")
+            answer = f"Based on your uploaded document **{doc_name}**:\n\n{body}"
+            citations = [{
+                "doc_title": doc_name,
+                "source_url": "",
+                "section_header": "Uploaded Document Content",
+                "excerpt": body[:200] + "...",
+            }]
+            tokens = 340
+            cost_usd = 0.000030
+            meta = {
+                "latency_ms": 135,
+                "cache_hit": None,
+                "tokens_saved": 0,
+                "cost_saved_usd": 0.0,
+                "total_tokens": tokens,
+                "cost_usd": cost_usd,
+                "citations": citations,
+            }
+            return answer, citations, meta
 
     topic = "architecture"
     if any(k in normalized for k in ["remote", "work", "pto", "leave", "stipend", "policy", "benefit"]):

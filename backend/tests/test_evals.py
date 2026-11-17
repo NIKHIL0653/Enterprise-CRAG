@@ -5,11 +5,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from backend.evals.generate_dataset import (
+    extract_json,
+    generate_dataset,
+    get_mock_chunks,
+)
 from backend.evals.run_benchmarks import (
     GOLDEN_DATASET,
     compute_answer_relevance,
     compute_faithfulness_score,
     evaluate_single_query,
+    load_evaluation_dataset,
 )
 
 
@@ -102,3 +108,55 @@ async def test_evaluate_single_query_sse_parser() -> None:
     assert result["contexts"] == ["Remote policy excerpt"]
     assert result["total_tokens"] == 120
     assert result["cost_usd"] == 0.000015
+
+
+def test_load_evaluation_dataset_from_disk(tmp_path) -> None:
+    """Test loading a custom JSONL evaluation dataset."""
+    test_jsonl = tmp_path / "custom_eval.jsonl"
+    test_jsonl.write_text(
+        '{"category": "test", "question": "What is Q?", "ground_truth": "Ans A", "user_email": "u@a.com"}\n'
+        '{"category": "test2", "question": "What is Q2?", "ground_truth": "Ans B", "user_email": "u@a.com"}\n',
+        encoding="utf-8",
+    )
+    dataset = load_evaluation_dataset(test_jsonl)
+    assert len(dataset) == 2
+    assert dataset[0]["question"] == "What is Q?"
+    assert dataset[1]["ground_truth"] == "Ans B"
+
+
+def test_load_evaluation_dataset_fallback_missing_file() -> None:
+    """Test fallback when specified dataset path does not exist."""
+    dataset = load_evaluation_dataset("non_existent_file_path_12345.jsonl")
+    assert len(dataset) >= 5
+    assert dataset[0]["category"] in {"policy", "stipend", "strategy", "engineering", "security", "negative_fallback"}
+
+
+def test_generate_dataset_extract_json() -> None:
+    """Test JSON extraction from model response prose."""
+    raw = 'Here is the response:\n```json\n{"question": "How to deploy?", "ground_truth": "Run script", "category": "engineering"}\n```'
+    parsed = extract_json(raw)
+    assert parsed["question"] == "How to deploy?"
+    assert parsed["category"] == "engineering"
+
+    with pytest.raises(ValueError, match="No JSON object"):
+        extract_json("No json here")
+
+
+@pytest.mark.asyncio
+async def test_generate_dataset_dry_run(tmp_path) -> None:
+    """Test offline synthetic dataset generation."""
+    out_file = tmp_path / "synthetic.jsonl"
+    mock_chunks = get_mock_chunks(3)
+    assert len(mock_chunks) == 3
+
+    items = await generate_dataset(limit=2, output_path=str(out_file), dry_run=True)
+    assert len(items) == 2
+    assert out_file.exists()
+
+    # Verify file content
+    lines = out_file.read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines) == 2
+    first_item = lines[0]
+    assert "question" in first_item
+    assert "ground_truth" in first_item
+

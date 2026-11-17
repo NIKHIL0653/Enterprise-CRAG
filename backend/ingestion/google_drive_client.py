@@ -285,6 +285,8 @@ class GoogleDriveClient:
         log.debug("Extracting document content")
 
         def _fetch_content() -> str:
+            from backend.ingestion.parsers import parse_bytes_to_markdown
+
             if mime_type == _GOOGLE_DOC_MIME:
                 raw: bytes = (
                     self._drive.files()
@@ -292,56 +294,18 @@ class GoogleDriveClient:
                     .execute(num_retries=3)
                 )
                 return raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
-            elif mime_type == "application/pdf":
-                import io
 
-                from googleapiclient.http import MediaIoBaseDownload
-                from pypdf import PdfReader
+            import io
+            from googleapiclient.http import MediaIoBaseDownload
 
-                req = self._drive.files().get_media(fileId=file_id)
-                fh = io.BytesIO()
-                downloader = MediaIoBaseDownload(fh, req)
-                done = False
-                while not done:
-                    _, done = downloader.next_chunk()
-                fh.seek(0)
-                reader = PdfReader(fh)
-                pages = []
-                for i, page in enumerate(reader.pages):
-                    page_text = (page.extract_text() or "").strip()
-                    if page_text:
-                        pages.append(f"## Page {i + 1}\n\n{page_text}")
-                return "\n\n".join(pages)
-            elif mime_type in (
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "application/msword",
-            ):
-                import io
-                import xml.etree.ElementTree as ET
-                import zipfile
-
-                from googleapiclient.http import MediaIoBaseDownload
-
-                req = self._drive.files().get_media(fileId=file_id)
-                fh = io.BytesIO()
-                downloader = MediaIoBaseDownload(fh, req)
-                done = False
-                while not done:
-                    _, done = downloader.next_chunk()
-                fh.seek(0)
-                with zipfile.ZipFile(fh) as z:
-                    xml_content = z.read("word/document.xml")
-                tree = ET.fromstring(xml_content)
-                namespaces = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-                paragraphs = []
-                for p in tree.iterfind(".//w:p", namespaces):
-                    texts = [node.text for node in p.iterfind(".//w:t", namespaces) if node.text]
-                    if texts:
-                        paragraphs.append("".join(texts))
-                return "\n\n".join(paragraphs)
-            else:
-                raw = self._drive.files().get_media(fileId=file_id).execute()
-                return raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+            req = self._drive.files().get_media(fileId=file_id)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, req)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            fh.seek(0)
+            return parse_bytes_to_markdown(fh.read(), mime_type=mime_type)
 
         try:
             text = await asyncio.to_thread(_fetch_content)

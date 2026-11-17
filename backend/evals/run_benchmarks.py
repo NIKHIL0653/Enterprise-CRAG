@@ -15,6 +15,7 @@ Metrics evaluated:
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
@@ -78,6 +79,46 @@ GOLDEN_DATASET: list[dict[str, Any]] = [
         "user_email": "eval@example.com",
     },
 ]
+
+
+# ---------------------------------------------------------------------------
+# Dataset Loader
+# ---------------------------------------------------------------------------
+def load_evaluation_dataset(path: str | Path | None = None) -> list[dict[str, Any]]:
+    """
+    Load evaluation Q&A pairs from a JSONL file.
+
+    Falls back to EVAL_DATASET_PATH, default golden_dataset.jsonl, or GOLDEN_DATASET.
+
+    Args:
+        path: Optional file path to a JSONL dataset.
+
+    Returns:
+        List of parsed sample dictionaries.
+    """
+    dataset_file = path or os.getenv("EVAL_DATASET_PATH")
+    if not dataset_file:
+        default_file = Path(__file__).parent / "datasets" / "golden_dataset.jsonl"
+        if default_file.exists():
+            dataset_file = default_file
+
+    if dataset_file:
+        p = Path(dataset_file)
+        if p.exists() and p.is_file():
+            items = []
+            with p.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            items.append(json.loads(line))
+                        except json.JSONDecodeError as exc:
+                            log.warning("failed_to_parse_dataset_line", error=str(exc))
+            if items:
+                log.info("loaded_external_evaluation_dataset", path=str(p), count=len(items))
+                return items
+
+    return list(GOLDEN_DATASET)
 
 
 # ---------------------------------------------------------------------------
@@ -218,17 +259,24 @@ def compute_answer_relevance(question: str, answer: str) -> float:
     return min(overlap / max(len(q_words), 1), 1.0)
 
 
-async def run_evaluation(api_base_url: str = "http://localhost:8000") -> dict:
+async def run_evaluation(
+    api_base_url: str = "http://localhost:8000",
+    dataset: list[dict[str, Any]] | None = None,
+    dataset_path: str | Path | None = None,
+) -> dict:
     """
-    Run the full evaluation suite against the golden dataset.
+    Run the full evaluation suite against the golden or custom dataset.
 
     Args:
         api_base_url: Base URL of the running RAG API.
+        dataset: In-memory list of evaluation samples (optional).
+        dataset_path: Path to .jsonl dataset file (optional).
 
     Returns:
         dict with per-metric average scores and pass/fail status.
     """
-    log.info("eval_suite_start", dataset_size=len(GOLDEN_DATASET))
+    active_dataset = dataset if dataset is not None else load_evaluation_dataset(dataset_path)
+    log.info("eval_suite_start", dataset_size=len(active_dataset))
     langfuse = Langfuse(
         secret_key=settings.LANGFUSE_SECRET_KEY,
         public_key=settings.LANGFUSE_PUBLIC_KEY,
@@ -237,7 +285,7 @@ async def run_evaluation(api_base_url: str = "http://localhost:8000") -> dict:
 
     results = []
     async with httpx.AsyncClient(base_url=api_base_url) as client:
-        tasks = [evaluate_single_query(client, sample) for sample in GOLDEN_DATASET]
+        tasks = [evaluate_single_query(client, sample) for sample in active_dataset]
         raw_results = await asyncio.gather(*tasks)
 
     for result in raw_results:
@@ -314,6 +362,20 @@ async def run_evaluation(api_base_url: str = "http://localhost:8000") -> dict:
 
 
 if __name__ == "__main__":
-    api_url = os.getenv("RAG_API_URL", "http://localhost:8000")
-    metrics = asyncio.run(run_evaluation(api_base_url=api_url))
+    parser = argparse.ArgumentParser(description="Run Ragas benchmark evaluation suite.")
+    parser.add_argument(
+        "--api-url",
+        type=str,
+        default=os.getenv("RAG_API_URL", "http://localhost:8000"),
+        help="Base URL of the running RAG API.",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        help="Path to custom .jsonl evaluation dataset.",
+    )
+    args = parser.parse_args()
+
+    metrics = asyncio.run(run_evaluation(api_base_url=args.api_url, dataset_path=args.dataset))
     sys.exit(0 if metrics["passed"] else 1)

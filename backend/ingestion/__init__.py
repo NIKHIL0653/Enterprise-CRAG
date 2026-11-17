@@ -15,6 +15,7 @@ from __future__ import annotations
 from backend.ingestion.chunker import SemanticMarkdownChunker
 from backend.ingestion.embedder import GeminiEmbedder
 from backend.ingestion.google_drive_client import GoogleDriveClient
+from backend.ingestion.parsers import parse_bytes_to_markdown
 from backend.ingestion.sync_manager import SyncManager
 
 __all__: list[str] = [
@@ -22,4 +23,5 @@ __all__: list[str] = [
     "SemanticMarkdownChunker",
     "GeminiEmbedder",
     "SyncManager",
+    "parse_bytes_to_markdown",
 ]
