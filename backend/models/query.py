@@ -63,6 +63,10 @@ class QueryRequest(BaseModel):
         default_factory=list,
         description="Prior conversation turns for context-aware multi-turn retrieval.",
     )
+    doc_ids: list[str] | None = Field(
+        default=None,
+        description="Optional list of specific document IDs to scope retrieval to.",
+    )
 
     @field_validator("question")
     @classmethod
@@ -187,6 +191,7 @@ class RAGState(TypedDict, total=False):
     question: str
     standalone_question: str
     user_email: str
+    doc_ids: list[str] | None
     history: list[dict[str, str]]
     retrieved_docs: list[DocumentChunk]
     relevant_docs: list[DocumentChunk]
