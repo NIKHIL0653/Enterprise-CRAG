@@ -1,0 +1,75 @@
+name: LLM Evaluations & Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: "Target RAG API Base URL (leave empty for ephemeral CI spinup)"
+        required: false
+        default: ""
+  schedule:
+    # Run nightly at 02:00 UTC
+    - cron: "0 2 * * *"
+
+jobs:
+  evals:
+    name: Golden Dataset Benchmarks (Ragas & Langfuse)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: workspace_rag_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt httpx
+
+      - name: Start Ephemeral FastAPI Query Server
+        if: ${{ github.event.inputs.api_url == '' }}
+        env:
+          PYTHONPATH: .
+          DATABASE_URL: postgresql+asyncpg://test:testpassword@localhost:5432/workspace_rag_test
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_HOST: https://cloud.langfuse.com
+          GOOGLE_SERVICE_ACCOUNT_JSON: /tmp/fake_sa.json
+          GOOGLE_DRIVE_FOLDER_ID: test_drive_folder
+        run: |
+          echo '{"type":"service_account","project_id":"test"}' > /tmp/fake_sa.json
+          python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 &
+          echo "Waiting for API to become healthy..."
+          timeout 30 bash -c 'until curl -s http://localhost:8000/api/v1/query/health; do sleep 1; done'
+
+      - name: Execute LLM Benchmarks
+        env:
+          PYTHONPATH: .
+          RAG_API_URL: ${{ github.event.inputs.api_url || 'http://localhost:8000' }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_HOST: https://cloud.langfuse.com
+        run: |
+          python backend/evals/run_benchmarks.py

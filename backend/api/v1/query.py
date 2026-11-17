@@ -20,6 +20,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.agent import WorkspaceRAGGraph
 from backend.core.config import get_settings
+from backend.core.cost import calculate_cache_savings
 from backend.core.exceptions import AuthorizationError, WorkspaceRAGError
 from backend.core.logging import get_logger
 from backend.models import QueryRequest
@@ -91,6 +92,8 @@ async def _stream_rag_response(
 
             yield _sse_event("[DONE]")
 
+            tokens_saved = cached.get("tokens_saved", 0)
+            cost_saved_usd = calculate_cache_savings(tokens_saved)
             meta = {
                 "citations": cached.get("citations", []),
                 "session_id": body.session_id or str(uuid.uuid4()),
@@ -99,7 +102,10 @@ async def _stream_rag_response(
                 "is_faithful": True,
                 "latency_ms": cached.get("latency_ms", 0),
                 "cache_hit": cached.get("cache_type", "exact"),
-                "tokens_saved": cached.get("tokens_saved", 0),
+                "tokens_saved": tokens_saved,
+                "cost_saved_usd": cost_saved_usd,
+                "cost_usd": 0.0,
+                "total_tokens": 0,
             }
             yield _sse_event(json.dumps(meta))
             return  # early exit — no pipeline invocation needed
@@ -137,6 +143,12 @@ async def _stream_rag_response(
     # ------------------------------------------------------------------
     # Store result in cache — fire-and-forget, non-blocking.
     # ------------------------------------------------------------------
+    token_usage = final_state.get("token_usage") or {}
+    prompt_tokens = token_usage.get("prompt_tokens", 0)
+    completion_tokens = token_usage.get("completion_tokens", 0)
+    total_tokens = token_usage.get("total_tokens", 0)
+    cost_usd = token_usage.get("total_cost_usd", 0.0)
+
     if cache_manager and answer:
         asyncio.create_task(
             cache_manager.store(
@@ -144,7 +156,7 @@ async def _stream_rag_response(
                 user_email=str(body.user_email),
                 answer=answer,
                 citations=citations,
-                tokens_used=len(answer.split()) * 2,  # rough estimate
+                tokens_used=total_tokens or (len(answer.split()) * 2),
             )
         )
 
@@ -157,6 +169,11 @@ async def _stream_rag_response(
         "latency_ms": elapsed_ms,
         "cache_hit": None,
         "tokens_saved": 0,
+        "cost_saved_usd": 0.0,
+        "cost_usd": cost_usd,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
     }
     yield _sse_event(json.dumps(meta))
 

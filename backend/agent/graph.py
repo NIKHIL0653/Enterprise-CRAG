@@ -14,7 +14,14 @@ from typing import Any
 import structlog
 from langfuse import Langfuse
 from langgraph.graph import END, START, StateGraph
-from langgraph.graph.graph import CompiledGraph
+
+try:
+    from langgraph.graph.state import CompiledStateGraph as CompiledGraph
+except ImportError:
+    try:
+        from langgraph.graph.graph import CompiledGraph  # type: ignore[no-redef]
+    except ImportError:
+        CompiledGraph = Any  # type: ignore[assignment,misc]
 
 from backend.agent.nodes import (
     generate_answer_node,
@@ -25,6 +32,7 @@ from backend.agent.nodes import (
     verify_faithfulness_node,
 )
 from backend.core.config import get_settings
+from backend.core.cost import calculate_total_query_cost
 from backend.models import RAGState
 from backend.retrieval import CohereReranker, HybridRetriever
 
@@ -142,14 +150,17 @@ class WorkspaceRAGGraph:
         bound_grade_relevance = functools.partial(
             grade_relevance_node,
             llm_client=self._llm_client,
+            langfuse_client=self._langfuse,
         )
         bound_generate = functools.partial(
             generate_answer_node,
             llm_client=self._llm_client,
+            langfuse_client=self._langfuse,
         )
         bound_verify = functools.partial(
             verify_faithfulness_node,
             llm_client=self._llm_client,
+            langfuse_client=self._langfuse,
         )
 
         # Register nodes.
@@ -241,6 +252,11 @@ class WorkspaceRAGGraph:
             "is_relevant": False,
             "is_faithful": False,
             "trace_id": trace_id,
+            "token_usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
             "error": None,
         }
 
@@ -259,12 +275,31 @@ class WorkspaceRAGGraph:
                     self._langfuse.flush()
                     raise RuntimeError(f"RAG pipeline failed: {exc}") from exc
 
+                token_usage = final_state.get("token_usage") or {}
+                prompt_tok = int(token_usage.get("prompt_tokens", 0))
+                comp_tok = int(token_usage.get("completion_tokens", 0))
+                tot_tok = int(token_usage.get("total_tokens", 0))
+                costs = calculate_total_query_cost(
+                    prompt_tokens=prompt_tok,
+                    completion_tokens=comp_tok,
+                    query_embedding_tokens=max(1, len(question.split())),
+                    include_rerank=bool(final_state.get("retrieved_docs")),
+                )
+                token_usage.update(costs)
+                final_state["token_usage"] = token_usage
+
                 span.update(
                     output={
                         "answer": final_state.get("answer", ""),
                         "num_citations": len(final_state.get("citations", [])),
                         "is_relevant": final_state.get("is_relevant"),
                         "is_faithful": final_state.get("is_faithful"),
+                        "cost_usd": costs["total_cost_usd"],
+                    },
+                    usage={
+                        "input": prompt_tok,
+                        "output": comp_tok,
+                        "total": tot_tok,
                     },
                     level="DEFAULT",
                 )
@@ -272,6 +307,15 @@ class WorkspaceRAGGraph:
         except AttributeError:
             # Fallback if an older SDK instance is used
             final_state = await self._compiled.ainvoke(initial_state)
+            token_usage = final_state.get("token_usage") or {}
+            costs = calculate_total_query_cost(
+                prompt_tokens=int(token_usage.get("prompt_tokens", 0)),
+                completion_tokens=int(token_usage.get("completion_tokens", 0)),
+                query_embedding_tokens=max(1, len(question.split())),
+                include_rerank=bool(final_state.get("retrieved_docs")),
+            )
+            token_usage.update(costs)
+            final_state["token_usage"] = token_usage
 
         run_log.info(
             "run_done",

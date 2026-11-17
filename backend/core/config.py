@@ -129,6 +129,14 @@ class Settings(BaseSettings):
     CACHE_SIMILARITY_THRESHOLD: float = 0.16
 
     # ------------------------------------------------------------------ #
+    # Pricing & Cost Observability (USD)                                    #
+    # ------------------------------------------------------------------ #
+    GEMINI_INPUT_COST_PER_M: float = 0.075
+    GEMINI_OUTPUT_COST_PER_M: float = 0.30
+    GEMINI_EMBEDDING_COST_PER_M: float = 0.02
+    COHERE_RERANK_COST_PER_K: float = 2.00
+
+    # ------------------------------------------------------------------ #
     # Background sync                                                       #
     # ------------------------------------------------------------------ #
     SYNC_POLL_INTERVAL_SECONDS: int = 60

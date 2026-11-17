@@ -65,7 +65,18 @@ Here is why each core feature was introduced, what critical problem it solves, a
 ### Feature 6: Database-Level Enterprise Access Control (ACL) Enforcement
 * **What was introduced:** Hard document-level permission filtering baked directly into the PostgreSQL retrieval query using array overlap operators (`c.allowed_emails @> ARRAY[:user_email] OR c.allowed_domain = :domain`).
 * **Problem it solves (Why it was introduced):** Filtering documents in application code *after* vector retrieval creates severe data leak vulnerabilities and recall failures: unauthorized confidential chunks displace authorized chunks during the top-K ranking, leading to missing answers or cross-tenant data exposure.
-* **How it helps:** Unauthorized chunks are mathematically excluded at the database index layer before vector distance calculation, reranking, or LLM generation ever occur. Multi-tenant privacy and Google Drive access permissions are strictly preserved at zero additional latency cost."
+* **How it helps:** Unauthorized chunks are mathematically excluded at the database index layer before vector distance calculation, reranking, or LLM generation ever occur. Multi-tenant privacy and Google Drive access permissions are strictly preserved at zero additional latency cost.
+
+---
+
+### Feature 7: End-to-End Token Economics & Real-Time Cost Observability
+* **What was introduced:** A complete FinOps and cost-observability framework across the pipeline:
+  - **Token Harvesting:** Refactored Gemini API calls to `_gemini_generate_with_usage()`, capturing `response.usage_metadata` (`prompt_token_count`, `candidates_token_count`, `total_token_count`) across relevance grading, generation, and faithfulness checks.
+  - **Cost Engine (`backend/core/cost.py`):** Calculates itemized USD query costs based on Google Gemini rates ($0.075 / 1M prompt, $0.30 / 1M completion), Cohere reranker units ($0.002 / search query), and embedding token pricing.
+  - **Langfuse v5 Child Generation Spans:** Emits native OTel generation spans with structured `usage={"input": X, "output": Y}`, unlocking automated cost curves and dashboards in Langfuse Cloud.
+  - **Live Telemetry Badging:** Emits `tokens`, `cost_usd`, and `cost_saved_usd` in FastAPI SSE frames, displaying real-time query costs (`245ms · 412 tokens · $0.000038`) and cache ROI (`14ms · exact cache hit · 420 tokens ($0.000032) saved`) in Streamlit.
+* **Problem it solves (Why it was introduced):** Standard RAG systems operate as financial black boxes. Token metadata is discarded by SDK wrappers, third-party observability dashboards report $0.00 spend, and engineering teams have no per-query or per-user visibility into what drives their cloud bills.
+* **How it helps:** Delivers 100% token and dollar accountability for every request, enables granular cost allocation across departments, and quantitatively proves the monetary ROI of the two-tier caching engine.
 
 ---
 
@@ -403,18 +414,31 @@ I resolved this by:
    - Chunk Relevance Rate: % of retrieved chunks graded relevant (flags retrieval drift).
    - Faithfulness Rate: % of generated responses passing verification.
    - Safe Fallback Trigger Rate: % of queries routed to fallback (signals knowledge base coverage gaps).
-3. **Cache Economics:**
-   - Tier 1 vs Tier 2 Hit Ratios (Target: $>40\%$ combined cache hit rate).
-   - Token cost savings ($/month saved through caching).
+3. **Cost & Token Economics:**
+   - Real-time token consumption (prompt vs completion breakdown across nodes).
+   - Itemized query cost ($/query across LLM, query embedding, and Cohere search units).
+   - Monthly and per-user cache ROI ($ saved through exact and semantic caching).
 4. **Operational Health:**
    - Google Drive sync delta latency and error rates.
    - Cohere and Gemini rate limit headroom (429 monitoring)."
 
 ---
 
+#### Q14: How did you implement granular cost observability and prevent Langfuse Cloud from displaying $0.00 for LLM runs?
+**Answer:**
+"A common pitfall in production RAG systems is tracing pipelines only as high-level `chain` spans without harvesting underlying LLM token metrics. In this setup, Langfuse records latency and inputs/outputs, but displays 0 tokens and $0.00 cost because it lacks model-level token breakdowns.
+
+We solved this through a four-part telemetry architecture:
+1. **Token Harvesting:** We updated our Gemini async wrapper (`_gemini_generate_with_usage`) to extract `response.usage_metadata` (`prompt_token_count`, `candidates_token_count`, `total_token_count`) on every model invocation (grading, generation, and faithfulness verification), with safe fallback estimation when metadata is absent.
+2. **Child Generation Spans:** Each Gemini node emits a dedicated Langfuse observation with `as_type='generation'`, passing the exact model identifier (`gemini-2.5-flash`) and `usage: {"input": prompt_tokens, "output": completion_tokens, "total": total_tokens}`. This automatically activates Langfuse Cloud's cost calculations and usage analytics.
+3. **Itemized USD Cost Engine:** In `backend/core/cost.py`, we implemented deterministic pricing formulas based on Google Cloud and Cohere rate cards. It calculates `llm_cost_usd`, `embedding_cost_usd`, `rerank_cost_usd`, and `total_cost_usd` per query.
+4. **End-to-End User Visibility:** The final SSE metadata frame returns token counts, `cost_usd`, and `cost_saved_usd` on cache hits, which the Streamlit UI displays directly on each message badge (e.g. `245ms · 412 tokens · $0.000038` or `$0.000034 saved on cache hit`)."
+
+---
+
 ## 5. Senior / Staff Engineer Cross-Examination Deep-Dives
 
-#### Q14: "If your document corpus grows from 10,000 to 10,000,000 chunks, what breaks first, and how would you redesign it?"
+#### Q15: "If your document corpus grows from 10,000 to 10,000,000 chunks, what breaks first, and how would you redesign it?"
 **Answer:**
 "At 10,000,000 chunks:
 1. **IVFFlat Index Degradation:** IVFFlat requires periodic rebuilding as data grows because cluster centroids drift. I would migrate the pgvector index to **HNSW (Hierarchical Navigable Small World)**. HNSW supports dynamic insertions with consistent logarithmic search complexity ($O(\log N)$) without needing index rebuilds, trading a modest increase in memory usage for superior recall.
@@ -423,7 +447,7 @@ I resolved this by:
 
 ---
 
-#### Q15: "Why did you use Gemini Flash-Lite for generation rather than GPT-4o or Claude 3.5 Sonnet?"
+#### Q16: "Why did you use Gemini Flash-Lite for generation rather than GPT-4o or Claude 3.5 Sonnet?"
 **Answer:**
 "Production AI engineering requires balancing quality, cost, and latency.
 - In a Corrective RAG pipeline with high-precision retrieval (Hybrid + Cohere Rerank), the LLM's task is strictly extractive synthesis: it is given 3–5 pre-verified chunks and instructed to answer concisely without hallucination.
@@ -433,7 +457,7 @@ I resolved this by:
 
 ---
 
-#### Q16: "How do you prevent the LLM from outputting raw LaTeX math formatting or weird citation brackets in production?"
+#### Q17: "How do you prevent the LLM from outputting raw LaTeX math formatting or weird citation brackets in production?"
 **Answer:**
 "We implement a defense-in-depth approach across two layers:
 1. **System Prompt Constraint:** The system prompt explicitly mandates: *'Write in clean, natural prose using standard paragraphs or bullet points. Do NOT insert repetitive bracketed citations into every sentence. Avoid raw LaTeX markup for ordinary text and numbers.'*

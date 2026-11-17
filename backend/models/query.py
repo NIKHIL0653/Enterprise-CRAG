@@ -18,7 +18,7 @@ Example::
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -111,6 +111,15 @@ class Citation(BaseModel):
         return v[:200]
 
 
+class TokenUsage(BaseModel):
+    """Token usage and cost breakdown for a RAG request."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
+
 class QueryResponse(BaseModel):
     """Structured response returned by the ``/query`` endpoint.
 
@@ -125,6 +134,7 @@ class QueryResponse(BaseModel):
         session_id: Session identifier (echoed from request or newly created).
         trace_url: Optional URL to the Langfuse trace for this request,
             enabling one-click observability drill-down.
+        token_usage: Structured token usage and estimated USD cost.
     """
 
     answer: str
@@ -134,6 +144,7 @@ class QueryResponse(BaseModel):
     generation_latency_ms: float
     session_id: str
     trace_url: str | None = None
+    token_usage: TokenUsage | None = None
 
 
 class RAGState(TypedDict, total=False):
@@ -156,6 +167,7 @@ class RAGState(TypedDict, total=False):
             sufficient to answer the question.
         is_faithful: ``True`` if the faithfulness self-check passed.
         trace_id: Langfuse trace ID for observability correlation.
+        token_usage: Accumulated prompt/completion tokens and cost details.
         error: Human-readable error message if any node raised an exception;
             ``None`` on the happy path.
     """
@@ -169,4 +181,5 @@ class RAGState(TypedDict, total=False):
     is_relevant: bool
     is_faithful: bool
     trace_id: str
+    token_usage: dict[str, Any]
     error: str | None

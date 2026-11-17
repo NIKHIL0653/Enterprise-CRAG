@@ -272,13 +272,23 @@ for msg in st.session_state.messages:
             latency = meta.get("latency_ms")
             cache_hit = meta.get("cache_hit")
             tokens_saved = meta.get("tokens_saved", 0)
+            cost_saved = meta.get("cost_saved_usd", 0.0)
+            total_tokens = meta.get("total_tokens", 0)
+            cost_usd = meta.get("cost_usd", 0.0)
+
             parts = []
             if latency:
                 parts.append(f"{round(latency)}ms")
             if cache_hit:
-                parts.append(f"{cache_hit} cache hit")
-            if tokens_saved:
-                parts.append(f"{tokens_saved} tokens saved")
+                if cost_saved > 0:
+                    parts.append(f"{cache_hit} cache hit ({tokens_saved} tokens / ${cost_saved:.6f} saved)")
+                else:
+                    parts.append(f"{cache_hit} cache hit ({tokens_saved} tokens saved)")
+            else:
+                if total_tokens:
+                    parts.append(f"{total_tokens} tokens")
+                if cost_usd > 0:
+                    parts.append(f"${cost_usd:.6f}")
             if parts:
                 st.caption(" · ".join(parts))
 
@@ -370,13 +380,23 @@ if prompt:
             latency = meta_payload.get("latency_ms")
             cache_hit = meta_payload.get("cache_hit")
             tokens_saved = meta_payload.get("tokens_saved", 0)
+            cost_saved = meta_payload.get("cost_saved_usd", 0.0)
+            total_tokens = meta_payload.get("total_tokens", 0)
+            cost_usd = meta_payload.get("cost_usd", 0.0)
+
             parts = []
             if latency:
                 parts.append(f"{round(latency)}ms")
             if cache_hit:
-                parts.append(f"{cache_hit} cache hit")
-            if tokens_saved:
-                parts.append(f"{tokens_saved} tokens saved")
+                if cost_saved > 0:
+                    parts.append(f"{cache_hit} cache hit ({tokens_saved} tokens / ${cost_saved:.6f} saved)")
+                else:
+                    parts.append(f"{cache_hit} cache hit ({tokens_saved} tokens saved)")
+            else:
+                if total_tokens:
+                    parts.append(f"{total_tokens} tokens")
+                if cost_usd > 0:
+                    parts.append(f"${cost_usd:.6f}")
             if parts:
                 st.caption(" · ".join(parts))
 

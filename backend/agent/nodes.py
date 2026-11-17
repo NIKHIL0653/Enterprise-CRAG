@@ -59,6 +59,43 @@ def _extract_json(text: str) -> dict[str, Any]:
     return json.loads(match.group())
 
 
+async def _gemini_generate_with_usage(
+    llm_client: Any,
+    prompt: str,
+) -> tuple[str, dict[str, int]]:
+    """Call the Gemini generate API and return response text and token counts.
+
+    Args:
+        llm_client: A configured ``google.generativeai.GenerativeModel`` instance.
+        prompt: Full prompt string to send.
+
+    Returns:
+        Tuple of (stripped response text, usage dict with prompt_tokens,
+        completion_tokens, and total_tokens).
+
+    Raises:
+        RuntimeError: If the Gemini call fails.
+    """
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    try:
+        response = await llm_client.generate_content_async(prompt)
+        text = response.text.strip()
+        metadata = getattr(response, "usage_metadata", None)
+        if metadata:
+            usage["prompt_tokens"] = getattr(metadata, "prompt_token_count", 0) or 0
+            usage["completion_tokens"] = getattr(metadata, "candidates_token_count", 0) or 0
+            usage["total_tokens"] = getattr(metadata, "total_token_count", 0) or 0
+        else:
+            prompt_est = max(1, len(prompt.split()))
+            comp_est = max(1, len(text.split()))
+            usage["prompt_tokens"] = prompt_est
+            usage["completion_tokens"] = comp_est
+            usage["total_tokens"] = prompt_est + comp_est
+        return text, usage
+    except Exception as exc:
+        raise RuntimeError(f"Gemini generation failed: {exc}") from exc
+
+
 async def _gemini_generate(llm_client: Any, prompt: str) -> str:
     """Call the Gemini generate API and return the response text.
 
@@ -72,11 +109,8 @@ async def _gemini_generate(llm_client: Any, prompt: str) -> str:
     Raises:
         RuntimeError: If the Gemini call fails.
     """
-    try:
-        response = await llm_client.generate_content_async(prompt)
-        return response.text.strip()
-    except Exception as exc:
-        raise RuntimeError(f"Gemini generation failed: {exc}") from exc
+    text, _ = await _gemini_generate_with_usage(llm_client, prompt)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +210,8 @@ async def _grade_single_chunk(
     question: str,
     llm_client: Any,
     node_log: Any,
-) -> tuple["DocumentChunk", float, bool]:
+    langfuse_client: Any = None,
+) -> tuple["DocumentChunk", float, bool, dict[str, int]]:
     """Grade a single document chunk for relevance to the user question.
 
     This is a module-level helper used by ``grade_relevance_node`` to enable
@@ -187,9 +222,10 @@ async def _grade_single_chunk(
         question: The user's question string.
         llm_client: Configured ``google.generativeai.GenerativeModel`` instance.
         node_log: Bound structlog logger from the calling node.
+        langfuse_client: Optional Langfuse client for child generation tracing.
 
     Returns:
-        A 3-tuple of ``(chunk, score, is_relevant)``.
+        A 4-tuple of ``(chunk, score, is_relevant, usage_dict)``.
     """
     prompt = (
         "You are a document relevance grader.\n"
@@ -197,8 +233,31 @@ async def _grade_single_chunk(
         f"Document excerpt: {chunk.content}\n"
         'Reply with a single JSON: {"relevant": true/false, "score": 0.0-1.0}'
     )
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     try:
-        raw = await _gemini_generate(llm_client, prompt)
+        if langfuse_client and hasattr(langfuse_client, "start_as_current_observation"):
+            try:
+                with langfuse_client.start_as_current_observation(
+                    name="grade_relevance_chunk",
+                    as_type="generation",
+                    model=settings.GEMINI_MODEL,
+                    input=prompt,
+                ) as gen_span:
+                    raw, usage = await _gemini_generate_with_usage(llm_client, prompt)
+                    gen_span.update(
+                        output=raw,
+                        usage={
+                            "input": usage["prompt_tokens"],
+                            "output": usage["completion_tokens"],
+                            "total": usage["total_tokens"],
+                        },
+                        model=settings.GEMINI_MODEL,
+                    )
+            except Exception:
+                raw, usage = await _gemini_generate_with_usage(llm_client, prompt)
+        else:
+            raw, usage = await _gemini_generate_with_usage(llm_client, prompt)
+
         parsed = _extract_json(raw)
         score = float(parsed.get("score", 0.0))
         is_relevant = bool(parsed.get("relevant", False))
@@ -210,12 +269,13 @@ async def _grade_single_chunk(
         )
         score = 0.0
         is_relevant = False
-    return chunk, score, is_relevant
+    return chunk, score, is_relevant, usage
 
 
 async def grade_relevance_node(
     state: RAGState,
     llm_client: Any,
+    langfuse_client: Any = None,
 ) -> dict[str, Any]:
     """Grade each retrieved chunk for relevance to the user question.
 
@@ -228,32 +288,38 @@ async def grade_relevance_node(
     Args:
         state: Current ``RAGState`` with ``question`` and ``retrieved_docs``.
         llm_client: Configured ``google.generativeai.GenerativeModel`` instance.
+        langfuse_client: Optional Langfuse client for child generation tracing.
 
     Returns:
-        Dict with keys ``is_relevant`` (bool) and ``relevant_docs``
-        (list of relevant ``DocumentChunk``).
+        Dict with keys ``is_relevant`` (bool), ``relevant_docs``
+        (list of relevant ``DocumentChunk``), and ``token_usage`` (dict).
     """
     node_log = log.bind(node="grade_relevance", question=state["question"])
     node_log.info("node_start", num_docs=len(state["retrieved_docs"]))
 
+    token_usage = dict(state.get("token_usage") or {})
+
     if not state["retrieved_docs"]:
         node_log.warning("no_retrieved_docs")
-        return {"is_relevant": False, "relevant_docs": []}
+        return {"is_relevant": False, "relevant_docs": [], "token_usage": token_usage}
 
     scores: list[float] = []
     relevant_docs: list[DocumentChunk] = []
 
     results = await asyncio.gather(
         *[
-            _grade_single_chunk(chunk, state["question"], llm_client, node_log)
+            _grade_single_chunk(chunk, state["question"], llm_client, node_log, langfuse_client)
             for chunk in state["retrieved_docs"]
         ],
         return_exceptions=False,
     )
-    for chunk, score, is_relevant_chunk in results:
+    for chunk, score, is_relevant_chunk, chunk_usage in results:
         scores.append(score)
         if is_relevant_chunk:
             relevant_docs.append(chunk)
+        token_usage["prompt_tokens"] = token_usage.get("prompt_tokens", 0) + chunk_usage["prompt_tokens"]
+        token_usage["completion_tokens"] = token_usage.get("completion_tokens", 0) + chunk_usage["completion_tokens"]
+        token_usage["total_tokens"] = token_usage.get("total_tokens", 0) + chunk_usage["total_tokens"]
 
     avg_score = sum(scores) / len(scores) if scores else 0.0
     max_score = max(scores, default=0.0)
@@ -264,8 +330,9 @@ async def grade_relevance_node(
         avg_score=avg_score,
         relevant_count=len(relevant_docs),
         is_relevant=is_relevant,
+        tokens=token_usage.get("total_tokens", 0),
     )
-    return {"is_relevant": is_relevant, "relevant_docs": relevant_docs}
+    return {"is_relevant": is_relevant, "relevant_docs": relevant_docs, "token_usage": token_usage}
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +437,7 @@ def _parse_citations(
 async def generate_answer_node(
     state: RAGState,
     llm_client: Any,
+    langfuse_client: Any = None,
 ) -> dict[str, Any]:
     """Generate a grounded, cited answer from the relevant document chunks.
 
@@ -380,12 +448,16 @@ async def generate_answer_node(
     Args:
         state: Current ``RAGState`` with ``question`` and ``relevant_docs``.
         llm_client: Configured ``google.generativeai.GenerativeModel`` instance.
+        langfuse_client: Optional Langfuse client for child generation tracing.
 
     Returns:
-        Dict with keys ``answer`` (str) and ``citations`` (list[Citation]).
+        Dict with keys ``answer`` (str), ``citations`` (list[Citation]),
+        and ``token_usage`` (dict).
     """
     node_log = log.bind(node="generate_answer", question=state["question"])
     node_log.info("node_start", num_relevant=len(state["relevant_docs"]))
+
+    token_usage = dict(state.get("token_usage") or {})
 
     context = _build_context(state["relevant_docs"])
     full_prompt = (
@@ -396,12 +468,39 @@ async def generate_answer_node(
     )
 
     try:
-        answer = await _gemini_generate(llm_client, full_prompt)
+        if langfuse_client and hasattr(langfuse_client, "start_as_current_observation"):
+            try:
+                with langfuse_client.start_as_current_observation(
+                    name="generate_answer",
+                    as_type="generation",
+                    model=settings.GEMINI_MODEL,
+                    input=full_prompt,
+                ) as gen_span:
+                    answer, usage = await _gemini_generate_with_usage(llm_client, full_prompt)
+                    gen_span.update(
+                        output=answer,
+                        usage={
+                            "input": usage["prompt_tokens"],
+                            "output": usage["completion_tokens"],
+                            "total": usage["total_tokens"],
+                        },
+                        model=settings.GEMINI_MODEL,
+                    )
+            except Exception:
+                answer, usage = await _gemini_generate_with_usage(llm_client, full_prompt)
+        else:
+            answer, usage = await _gemini_generate_with_usage(llm_client, full_prompt)
+
+        token_usage["prompt_tokens"] = token_usage.get("prompt_tokens", 0) + usage["prompt_tokens"]
+        token_usage["completion_tokens"] = token_usage.get("completion_tokens", 0) + usage["completion_tokens"]
+        token_usage["total_tokens"] = token_usage.get("total_tokens", 0) + usage["total_tokens"]
+
     except RuntimeError as exc:
         node_log.error("generation_failed", error=str(exc))
         return {
             "answer": _SAFE_ANSWER,
             "citations": [],
+            "token_usage": token_usage,
         }
 
     citations = _parse_citations(answer, state["relevant_docs"])
@@ -427,8 +526,13 @@ async def generate_answer_node(
     clean_ans = re.sub(r'[ \t]+', ' ', clean_ans)
     clean_ans = re.sub(r'\s+([.,;:!?])', r'\1', clean_ans).strip()
 
-    node_log.info("node_done", answer_length=len(clean_ans), num_citations=len(citations))
-    return {"answer": clean_ans, "citations": citations}
+    node_log.info(
+        "node_done",
+        answer_length=len(clean_ans),
+        num_citations=len(citations),
+        tokens=token_usage.get("total_tokens", 0),
+    )
+    return {"answer": clean_ans, "citations": citations, "token_usage": token_usage}
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +543,7 @@ async def generate_answer_node(
 async def verify_faithfulness_node(
     state: RAGState,
     llm_client: Any,
+    langfuse_client: Any = None,
 ) -> dict[str, Any]:
     """Check whether every factual claim in the answer is grounded in context.
 
@@ -449,12 +554,16 @@ async def verify_faithfulness_node(
     Args:
         state: Current ``RAGState`` with ``relevant_docs`` and ``answer``.
         llm_client: Configured ``google.generativeai.GenerativeModel`` instance.
+        langfuse_client: Optional Langfuse client for child generation tracing.
 
     Returns:
-        Dict with keys ``is_faithful`` (bool) and ``faithfulness_score`` (float).
+        Dict with keys ``is_faithful`` (bool), ``faithfulness_score`` (float),
+        and ``token_usage`` (dict).
     """
     node_log = log.bind(node="verify_faithfulness")
     node_log.info("node_start")
+
+    token_usage = dict(state.get("token_usage") or {})
 
     context = _build_context(state["relevant_docs"])
     prompt = (
@@ -466,14 +575,39 @@ async def verify_faithfulness_node(
     )
 
     try:
-        raw = await _gemini_generate(llm_client, prompt)
+        if langfuse_client and hasattr(langfuse_client, "start_as_current_observation"):
+            try:
+                with langfuse_client.start_as_current_observation(
+                    name="verify_faithfulness",
+                    as_type="generation",
+                    model=settings.GEMINI_MODEL,
+                    input=prompt,
+                ) as gen_span:
+                    raw, usage = await _gemini_generate_with_usage(llm_client, prompt)
+                    gen_span.update(
+                        output=raw,
+                        usage={
+                            "input": usage["prompt_tokens"],
+                            "output": usage["completion_tokens"],
+                            "total": usage["total_tokens"],
+                        },
+                        model=settings.GEMINI_MODEL,
+                    )
+            except Exception:
+                raw, usage = await _gemini_generate_with_usage(llm_client, prompt)
+        else:
+            raw, usage = await _gemini_generate_with_usage(llm_client, prompt)
+
+        token_usage["prompt_tokens"] = token_usage.get("prompt_tokens", 0) + usage["prompt_tokens"]
+        token_usage["completion_tokens"] = token_usage.get("completion_tokens", 0) + usage["completion_tokens"]
+        token_usage["total_tokens"] = token_usage.get("total_tokens", 0) + usage["total_tokens"]
+
         parsed = _extract_json(raw)
         is_faithful: bool = bool(parsed.get("faithful", False))
         faithfulness_score: float = float(parsed.get("score", 0.0))
         issues: list[str] = parsed.get("issues", [])
     except Exception as exc:
         node_log.warning("faithfulness_parse_failed", error=str(exc))
-        # Default to not faithful so the fallback node is triggered.
         is_faithful = False
         faithfulness_score = 0.0
         issues = []
@@ -483,8 +617,13 @@ async def verify_faithfulness_node(
         is_faithful=is_faithful,
         faithfulness_score=faithfulness_score,
         issues=issues,
+        tokens=token_usage.get("total_tokens", 0),
     )
-    return {"is_faithful": is_faithful, "faithfulness_score": faithfulness_score}
+    return {
+        "is_faithful": is_faithful,
+        "faithfulness_score": faithfulness_score,
+        "token_usage": token_usage,
+    }
 
 
 # ---------------------------------------------------------------------------
