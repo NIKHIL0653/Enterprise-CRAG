@@ -106,6 +106,16 @@ Here is why each core feature was introduced, what critical problem it solves, a
 
 ---
 
+### Feature 11: Zero-Dependency Embedded Vector Engine with Dual-Store Abstraction
+* **What was introduced:** A zero-dependency embedded vector engine (`backend/services/embedded_store.py`) combining standard library SQLite FTS5 (for BM25 text search) with NumPy float32 vector cosine similarity, coupled with automatic graceful degradation in `lifespan`:
+  - If PostgreSQL is reachable, the backend runs against PostgreSQL 16 + `pgvector`.
+  - If PostgreSQL is offline (e.g., local developer without Docker Desktop), the backend gracefully falls back to `EmbeddedVectorStore` (`data/embedded_rag.db`).
+  - Both engines support the exact same `retrieve()`, `upsert_chunks()`, `list_documents()`, and **two-tier exact & semantic vector caching** interfaces.
+* **Problem it solves:** Production RAG systems typically have high barrier-to-entry setup costs: requiring engineers to install Docker Desktop, boot multi-container stacks, or run cloud databases just to develop locally, run offline evals, or test on constrained edge machines. When PostgreSQL fails to start, naive backends crash during boot.
+* **How it helps:** Eliminates the Docker dependency for local development and edge deployments. Engineers can start `uvicorn backend.main:app` out-of-the-box with 100% feature parity (hybrid search, RRF fusion, Cohere reranking, streaming SSE, and two-tier semantic caching).
+
+---
+
 ## 2. End-to-End System Architecture
 
 ### Architectural Workflow Diagram
@@ -543,7 +553,7 @@ We solve this using **Conversational Query Condensation**:
 
 We solve this through a two-tier evaluation architecture:
 1. **Tier 1: Fast, Free CI Quality Gate (Every PR / Push):**
-   - Runs `ruff check` and `pytest backend/tests/` (48 unit tests in ~11s).
+   - Runs `ruff check` and `pytest backend/tests/` (54 unit tests in ~11s).
    - In `test_evals.py`, we validate evaluation data schemas, SSE parsing, and test scoring algorithms against mock inputs. This ensures 100% CI determinism with zero API bills and zero rate limit flakiness.
 2. **Tier 2: Continuous & On-Demand LLM Benchmarks (`backend/evals/`):**
    - Evaluates the live system against a golden dataset (`golden_dataset.jsonl`) and synthetic test cases.
@@ -555,18 +565,33 @@ We solve this through a two-tier evaluation architecture:
 
 ---
 
+#### Q21: "How do you enable local developer onboarding and offline edge deployments when your production architecture relies on PostgreSQL pgvector?"
+**Answer:**
+"A common production friction point is the 'works on my machine' dilemma: forcing engineers to run Docker Desktop, configure network bridges, and mount local volumes just to test a single API endpoint.
+
+We solved this using a **Dual-Store Polyglot Abstraction**:
+1. **Unified Storage Protocol:** `HybridRetriever`, `SyncManager`, and `QueryCacheManager` interact with a unified interface rather than raw PostgreSQL SQL strings.
+2. **Standard-Library Fallback:** In `embedded_store.py`, we paired Python's standard-library SQLite with:
+   - **SQLite FTS5** for BM25 sparse keyword ranking with Porter stemming.
+   - **NumPy float32 dot-product & Euclidean norms** for dense vector cosine distance calculation.
+3. **Graceful Lifespan Degradation:** During application startup in `backend/main.py`, the lifespan context manager attempts to connect to PostgreSQL. If connection times out (e.g. Docker is offline), it logs a warning, transparently boots `EmbeddedVectorStore` (`data/embedded_rag.db`), and starts FastAPI without crashing.
+4. **Behavioral Parity:** The embedded engine implements RRF fusion ($k=60$), document scoping (`doc_ids`), and two-tier canonical SHA-256 + vector caching ($\le 0.16$), delivering identical behavior with zero external setup."
+
+---
+
 ## 6. Architecture & Implementation Quick Reference Table
 
 | Component | Technology | Configuration / Hyperparameters | Justification |
 | :--- | :--- | :--- | :--- |
 | **Embeddings** | `gemini-embedding-001` | 768 dimensions | High semantic density, native integration with Google API ecosystem |
-| **Vector DB** | PostgreSQL 16 + `pgvector` | `ivfflat` (`vector_cosine_ops`), lists=20 | Single ACID store for vectors, relational metadata, and caching |
-| **Hybrid Search** | Dense + Postgres BM25 | RRF smoothing constant $k=60$ | Scale-invariant rank fusion of dense semantics and sparse keywords |
+| **Vector DB (Cloud/Prod)** | PostgreSQL 16 + `pgvector` | `ivfflat` (`vector_cosine_ops`), lists=20 | Single ACID store for vectors, relational metadata, and caching |
+| **Vector DB (Local/Edge)** | SQLite FTS5 + NumPy | Single-file (`embedded_rag.db`) | Zero-dependency, zero-Docker fallback with BM25 + cosine vector search |
+| **Hybrid Search** | Dense + Postgres BM25 / SQLite FTS5 | RRF smoothing constant $k=60$ | Scale-invariant rank fusion of dense semantics and sparse keywords |
 | **Reranker** | Cohere `rerank-v3.5` | Top-15 $\to$ Top-5 | Cross-encoder cross-attention eliminates false positives |
 | **Agent Framework** | LangGraph 0.2+ | StateGraph, `asyncio.gather` concurrent grading | Cyclic state machine with self-correction and non-blocking grading |
 | **LLM Generator** | `gemini-3.5-flash-lite` | Temperature=0.2, Top-P=0.95 | Low latency (<500ms TTFT), cost-effective extractive grounding |
-| **Tier-1 Cache** | In-Memory / PostgreSQL | SHA-256 over canonicalized query | Sub-2ms response time for identical and rephrased queries |
-| **Tier-2 Cache** | `pgvector` Cosine Distance | Cutoff threshold $= 0.16$ | Saves LLM inference on semantically equivalent questions |
+| **Tier-1 Cache** | In-Memory / PostgreSQL / SQLite | SHA-256 over canonicalized query | Sub-2ms response time for identical and rephrased queries |
+| **Tier-2 Cache** | `pgvector` / NumPy Cosine Distance | Cutoff threshold $= 0.16$ | Saves LLM inference on semantically equivalent questions |
 | **Observability** | Langfuse v5 Cloud | Native OpenTelemetry tracer | Distributed spans, step latencies, token economics, and evaluation |
 | **Frontend** | Streamlit | Minimal pure Python, fixed 255px sidebar | Zero-dependency, responsive, real-time SSE streaming with doc inspector |
 

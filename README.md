@@ -189,11 +189,17 @@ Every query execution creates a distributed trace in Langfuse capturing:
 - **Typed Schema**: Supported end-to-end via `ChatMessage` models in FastAPI and LangGraph `RAGState`.
 
 ### 10. Automated LLM Evals Pipeline & Continuous Benchmarks
-- **Two-Tier Quality Gating**: Separates fast, deterministic, zero-cost CI unit tests (`pytest backend/tests/` running 48 tests in ~11s on every PR) from continuous live LLM evaluations.
+- **Two-Tier Quality Gating**: Separates fast, deterministic, zero-cost CI unit tests (`pytest backend/tests/` running 54 tests in ~11s on every PR) from continuous live LLM evaluations.
 - **Golden Ground-Truth Benchmark (`golden_dataset.jsonl`)**: Multi-domain evaluation set spanning corporate policies, engineering standards, security protocols, and out-of-domain safe fallback defenses (*"What is the capital of Mars?"*).
 - **Automated Metric Suite (`run_benchmarks.py`)**: Computes **Faithfulness** ($\ge 80\%$) and **Answer Relevance** ($\ge 75\%$), pushes scores to **Langfuse**, and gates builds on regression.
 - **Nightly CI/CD Runner (`.github/workflows/evals-nightly.yml`)**: Automated nightly workflow with PostgreSQL 16 + `pgvector` and Redis service containers.
 - **Interactive UI Dashboard**: Embedded "Benchmark Evaluations" tab in Streamlit displaying real-time metric scoreboards, latency tracking, and query drill-downs.
+
+### 11. Zero-Dependency Embedded Local Store & Universal Two-Tier Caching
+- **Dual-Store Polyglot Abstraction**: The backend runs against **PostgreSQL 16 (`pgvector`)** in Docker/production and automatically falls back to an **Embedded Vector Store (SQLite FTS5 + NumPy)** on local machines without Docker.
+- **Embedded Hybrid Search**: Combines SQLite FTS5 BM25 text search with NumPy vector cosine similarity and Reciprocal Rank Fusion ($k=60$).
+- **Full Parity Two-Tier Caching**: Persists exact SHA-256 canonical matches (<2ms) and semantic vector matches ($\le 0.16$ distance) locally, with cascade cache invalidation on file uploads.
+- **Instant Local Boot**: Enables running `python -m uvicorn backend.main:app` out-of-the-box with zero Docker or cloud database setup.
 
 ---
 
@@ -203,11 +209,12 @@ Every query execution creates a distributed trace in Langfuse capturing:
 |---|---|---|
 | **LLM Inference** | Google Gemini API | `gemini-2.0-flash` / `gemini-3.5-flash-lite` |
 | **Embeddings** | Google Gemini Embedding | `models/gemini-embedding-001` (768-dim) |
-| **Vector Database** | PostgreSQL 16 + pgvector | `ivfflat` (cosine distance `<=>`), `pg_trgm` GIN index |
+| **Vector Database (Cloud/Prod)** | PostgreSQL 16 + pgvector | `ivfflat` (cosine distance `<=>`), `pg_trgm` GIN index |
+| **Vector Database (Local/Edge)** | SQLite FTS5 + NumPy | Single-file (`embedded_rag.db`) BM25 + float32 cosine vector search |
 | **Reranking** | Cohere API | `rerank-v3.5` (top-15 to top-5) |
 | **Orchestration** | LangGraph & LangChain Core | StateGraph state machine with conditional routing |
 | **Backend API** | FastAPI + Uvicorn | Async ASGI server, Server-Sent Events (SSE) streaming |
-| **Database Client** | `asyncpg` | Native asynchronous PostgreSQL connection pool |
+| **Database Client** | `asyncpg` / `sqlite3` | Native asynchronous pool + embedded thread-safe store |
 | **Observability** | Langfuse | Full tracing of spans, latency, token usage, and evals |
 | **Frontend UI** | Streamlit | Pure Python, light theme, real-time SSE stream consumption |
 
