@@ -155,3 +155,60 @@ async def test_cache_store() -> None:
 
     mock_conn.execute.assert_awaited_once()
     mock_embedder.embed_query.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cache_with_embedded_store_two_tier(tmp_path) -> None:
+    """Test two-tier caching over EmbeddedVectorStore (SQLite + NumPy)."""
+    from backend.services.embedded_store import EmbeddedVectorStore
+
+    embedded_store = EmbeddedVectorStore(tmp_path / "cache_test.db")
+
+    mock_embedder = MagicMock()
+    # Vector for remote work
+    vec_remote = [1.0, 0.0, 0.0, 0.0]
+    # Slightly perturbed vector for semantic match (cosine distance ~0.05)
+    vec_perturbed = [0.98, 0.20, 0.0, 0.0]
+    # Orthogonal vector for miss
+    vec_unrelated = [0.0, 0.0, 1.0, 0.0]
+
+    mock_embedder.embed_query = AsyncMock(side_effect=lambda q: (
+        vec_remote if "remote" in q.lower()
+        else vec_perturbed if "work" in q.lower() or "guidelines" in q.lower()
+        else vec_unrelated
+    ))
+
+    cache = QueryCacheManager(pool=embedded_store, embedder=mock_embedder)
+
+    # 1. Store
+    await cache.store(
+        question="What is the remote work policy?",
+        user_email="alice@acme.com",
+        answer="Remote work is allowed full time.",
+        citations=[{"doc_id": "doc1", "excerpt": "Remote work is allowed."}],
+        tokens_used=150,
+    )
+
+    # 2. Exact hit (normalized)
+    hit_exact = await cache.lookup("what is the remote work policy?", "alice@acme.com")
+    assert hit_exact is not None
+    assert hit_exact["cache_type"] == "exact"
+    assert hit_exact["answer"] == "Remote work is allowed full time."
+    assert hit_exact["tokens_saved"] == 150
+
+    # 3. Semantic hit (different phrasing)
+    hit_semantic = await cache.lookup("Explain remote guidelines", "alice@acme.com")
+    assert hit_semantic is not None
+    assert hit_semantic["cache_type"] == "semantic"
+    assert hit_semantic["distance"] < 0.16
+
+    # 4. Cache miss
+    hit_miss = await cache.lookup("How to cook pasta?", "alice@acme.com")
+    assert hit_miss is None
+
+    # 5. Invalidation
+    deleted = await cache.invalidate_for_docs(embedded_store)
+    assert deleted == 1
+
+    hit_after_invalidation = await cache.lookup("What is the remote work policy?", "alice@acme.com")
+    assert hit_after_invalidation is None

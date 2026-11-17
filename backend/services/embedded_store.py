@@ -81,6 +81,20 @@ class EmbeddedVectorStore:
                     content,
                     tokenize='porter unicode61'
                 );
+
+                CREATE TABLE IF NOT EXISTS rag_query_cache (
+                    cache_id TEXT PRIMARY KEY,
+                    query_text TEXT NOT NULL,
+                    query_hash TEXT NOT NULL,
+                    user_email TEXT NOT NULL,
+                    embedding BLOB NOT NULL,
+                    answer TEXT NOT NULL,
+                    citations TEXT NOT NULL DEFAULT '[]',
+                    tokens_used INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_query_cache_hash ON rag_query_cache(query_hash);
                 """
             )
 
@@ -337,6 +351,136 @@ class EmbeddedVectorStore:
             conn.execute("DELETE FROM chunks_fts WHERE doc_id = ?;", (doc_id,))
             conn.execute("DELETE FROM document_chunks WHERE doc_id = ?;", (doc_id,))
             conn.execute("DELETE FROM documents WHERE doc_id = ?;", (doc_id,))
+
+    async def exact_cache_lookup(self, query_hash: str, user_email: str) -> dict[str, Any] | None:
+        """Lookup exact match by SHA-256 hash."""
+        with self._lock, self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT answer, citations, tokens_used, created_at
+                FROM rag_query_cache
+                WHERE query_hash = ? AND user_email = ?
+                LIMIT 1;
+                """,
+                (query_hash, user_email),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "answer": row["answer"],
+                "citations": json.loads(row["citations"]) if isinstance(row["citations"], str) else row["citations"],
+                "tokens_used": row["tokens_used"],
+                "created_at": row["created_at"],
+            }
+
+    async def semantic_cache_lookup(
+        self,
+        user_email: str,
+        query_vector: list[float],
+        threshold: float = 0.16,
+    ) -> dict[str, Any] | None:
+        """Perform vectorized cosine distance match on cached query embeddings."""
+        q_vec = np.array(query_vector, dtype=np.float32)
+        q_norm = np.linalg.norm(q_vec)
+        if q_norm == 0:
+            return None
+
+        q_unit = q_vec / q_norm
+
+        with self._lock, self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT answer, citations, tokens_used, created_at, embedding
+                FROM rag_query_cache
+                WHERE user_email = ?;
+                """,
+                (user_email,),
+            )
+            rows = cursor.fetchall()
+
+        if not rows:
+            return None
+
+        best_hit: dict[str, Any] | None = None
+        min_dist = float("inf")
+
+        for r in rows:
+            blob = r["embedding"]
+            c_vec = np.frombuffer(blob, dtype=np.float32)
+            c_norm = np.linalg.norm(c_vec)
+            if c_norm > 0:
+                sim = float(np.dot(q_unit, c_vec / c_norm))
+                dist = 1.0 - sim
+            else:
+                dist = 1.0
+
+            if dist < threshold and dist < min_dist:
+                min_dist = dist
+                best_hit = {
+                    "answer": r["answer"],
+                    "citations": json.loads(r["citations"]) if isinstance(r["citations"], str) else r["citations"],
+                    "tokens_used": r["tokens_used"],
+                    "distance": round(min_dist, 4),
+                    "created_at": r["created_at"],
+                }
+
+        return best_hit
+
+    async def store_cache(
+        self,
+        cache_id: str,
+        query_text: str,
+        query_hash: str,
+        user_email: str,
+        embedding: list[float],
+        answer: str,
+        citations: list[dict[str, Any]] | None,
+        tokens_used: int = 0,
+    ) -> None:
+        """Persist a newly generated answer into the query cache."""
+        emb_blob = np.array(embedding, dtype=np.float32).tobytes()
+        citations_json = json.dumps(citations or [])
+        now_str = datetime.now(timezone.utc).isoformat()
+
+        with self._lock, self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO rag_query_cache (
+                    cache_id, query_text, query_hash, user_email, embedding,
+                    answer, citations, tokens_used, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cache_id) DO UPDATE SET
+                    answer=excluded.answer,
+                    citations=excluded.citations,
+                    embedding=excluded.embedding,
+                    tokens_used=excluded.tokens_used,
+                    created_at=excluded.created_at;
+                """,
+                (
+                    cache_id,
+                    query_text,
+                    query_hash,
+                    user_email,
+                    emb_blob,
+                    answer,
+                    citations_json,
+                    tokens_used,
+                    now_str,
+                ),
+            )
+
+    async def invalidate_cache(self, doc_id: str | None = None) -> int:
+        """Invalidate query cache entries."""
+        with self._lock, self._get_connection() as conn:
+            if doc_id:
+                cursor = conn.execute(
+                    "DELETE FROM rag_query_cache WHERE citations LIKE ?;",
+                    (f"%{doc_id}%",),
+                )
+            else:
+                cursor = conn.execute("DELETE FROM rag_query_cache;")
+            return cursor.rowcount
 
 
 _GLOBAL_STORE: EmbeddedVectorStore | None = None

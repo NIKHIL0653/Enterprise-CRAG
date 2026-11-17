@@ -165,7 +165,7 @@ class QueryCacheManager:
         )
     """
 
-    def __init__(self, pool: asyncpg.Pool, embedder: GeminiEmbedder) -> None:
+    def __init__(self, pool: Any, embedder: GeminiEmbedder) -> None:
         self._pool = pool
         self._embedder = embedder
         self._log = logger.bind(component="QueryCacheManager")
@@ -203,6 +203,42 @@ class QueryCacheManager:
         canonical_norm = _canonical_normalize(question)
         canonical_hash = _sha256_hex(user_email, canonical_norm)
         log = self._log.bind(user_email=user_email, canonical_key=canonical_norm[:20])
+
+        from backend.services.embedded_store import EmbeddedVectorStore
+
+        if isinstance(self._pool, EmbeddedVectorStore):
+            exact_hit = await self._pool.exact_cache_lookup(canonical_hash, user_email)
+            if exact_hit is not None:
+                latency_ms = (time.monotonic() - t0) * 1_000
+                log.info("cache_hit_exact_embedded", canonical_key=canonical_norm, latency_ms=round(latency_ms, 2))
+                return {
+                    "answer": exact_hit["answer"],
+                    "citations": exact_hit["citations"],
+                    "cache_type": "exact",
+                    "latency_ms": latency_ms,
+                    "tokens_saved": exact_hit["tokens_used"],
+                }
+
+            try:
+                embedding = await self._embedder.embed_query(question)
+            except Exception as exc:
+                log.warning("cache_embed_failed_during_lookup", error=str(exc))
+                return None
+
+            threshold = getattr(settings, "CACHE_SIMILARITY_THRESHOLD", _DEFAULT_SEMANTIC_THRESHOLD)
+            sem_hit = await self._pool.semantic_cache_lookup(user_email, embedding, threshold=threshold)
+            if sem_hit is not None:
+                latency_ms = (time.monotonic() - t0) * 1_000
+                log.info("cache_hit_semantic_embedded", latency_ms=round(latency_ms, 2))
+                return {
+                    "answer": sem_hit["answer"],
+                    "citations": sem_hit["citations"],
+                    "cache_type": "semantic",
+                    "distance": sem_hit.get("distance", 0.1),
+                    "latency_ms": latency_ms,
+                    "tokens_saved": sem_hit["tokens_used"],
+                }
+            return None
 
         # ------------------------------------------------------------------ #
         # 1. Canonical exact-hash lookup – zero LLM cost, instant (< 5ms)     #
@@ -299,6 +335,22 @@ class QueryCacheManager:
             log.warning("cache_embed_failed_during_store", error=str(exc))
             return
 
+        from backend.services.embedded_store import EmbeddedVectorStore
+
+        if isinstance(self._pool, EmbeddedVectorStore):
+            await self._pool.store_cache(
+                cache_id=cache_id,
+                query_text=canonical_norm,
+                query_hash=canonical_hash,
+                user_email=user_email,
+                embedding=embedding,
+                answer=answer,
+                citations=citations,
+                tokens_used=tokens_used,
+            )
+            log.info("cache_stored_embedded", canonical_key=canonical_norm)
+            return
+
         citations_json = json.dumps(citations)
 
         try:
@@ -323,25 +375,31 @@ class QueryCacheManager:
         except asyncpg.PostgresError as exc:
             log.error("cache_store_db_error", error=str(exc))
 
-    async def invalidate_for_docs(self, pool: asyncpg.Pool) -> int:
+    async def invalidate_for_docs(self, pool: Any) -> int:
         """Delete **all** rows from ``rag_query_cache`` and return the count.
 
         Call this after a document ingestion / sync cycle to ensure stale
         answers derived from superseded document content are evicted.
 
         Args:
-            pool: An open :class:`asyncpg.Pool`.  Accepts an explicit pool
-                argument so the caller can pass a different pool if needed
-                (e.g. a privileged connection during maintenance mode).
+            pool: An open database connection pool or EmbeddedVectorStore.
 
         Returns:
             The number of rows deleted.
 
         Raises:
-            asyncpg.PostgresError: If the DELETE statement fails.
+            Exception: If the DELETE statement fails.
         """
         log = self._log
         log.info("cache_invalidating_all")
+
+        from backend.services.embedded_store import EmbeddedVectorStore
+
+        if isinstance(pool, EmbeddedVectorStore):
+            count = await pool.invalidate_cache()
+            log.info("cache_invalidated_embedded", deleted_count=count)
+            return count
+
         try:
             async with pool.acquire() as conn:
                 result: str = await conn.execute(_DELETE_ALL_SQL)
