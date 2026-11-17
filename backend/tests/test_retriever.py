@@ -87,11 +87,11 @@ async def test_retrieve_forwards_doc_ids_to_subsearches() -> None:
     """Ensure doc_ids parameter is forwarded to both dense and sparse subsearches."""
     from backend.retrieval.hybrid_retriever import HybridRetriever
 
-    mock_pool = MagicMock()
+    mock_pool = MagicMock(spec=["acquire"])
     mock_conn = MagicMock()
     mock_acquire = MagicMock()
     mock_acquire.__aenter__ = AsyncMock(return_value=mock_conn)
-    mock_acquire.__aexit__ = AsyncMock()
+    mock_acquire.__aexit__ = AsyncMock(return_value=None)
     mock_pool.acquire.return_value = mock_acquire
 
     mock_embedder = MagicMock()

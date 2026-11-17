@@ -421,7 +421,7 @@ class SyncManager:
         return doc
 
     async def _upsert_to_db(self, doc: Document) -> None:
-        """Upsert a document and its chunks to PostgreSQL.
+        """Upsert a document and its chunks to database (PostgreSQL or EmbeddedVectorStore).
 
         Strategy:
         1. Upsert document-level metadata into the ``documents`` table.
@@ -432,8 +432,7 @@ class SyncManager:
             doc: The :class:`~backend.models.document.Document` to persist.
 
         Raises:
-            Exception: Propagates any ``asyncpg`` database error upward; the
-                caller is responsible for catching and logging.
+            Exception: Propagates any database error upward.
         """
         log = logger.bind(
             method="_upsert_to_db",
@@ -441,6 +440,21 @@ class SyncManager:
             chunk_count=len(doc.chunks),
         )
         log.debug("Upserting document to database")
+
+        from backend.services.embedded_store import EmbeddedVectorStore
+        if isinstance(self._pool, EmbeddedVectorStore):
+            await self._pool.upsert_document(
+                doc_id=doc.doc_id,
+                title=doc.title,
+                source_url=doc.source_url,
+                mime_type=doc.mime_type,
+                owner_email=doc.owner_email,
+                allowed_emails=doc.allowed_emails,
+                allowed_domain=doc.allowed_domain,
+            )
+            await self._pool.upsert_chunks(doc.chunks)
+            log.info("Document upserted successfully via EmbeddedVectorStore", doc_id=doc.doc_id)
+            return
 
         async with self._pool.acquire() as conn:
             async with conn.transaction():

@@ -69,12 +69,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ----- Startup -----
     logger.info("application_startup_begin", version=settings.APP_VERSION)
 
-    # 1. Database pool
-    db_pool = await create_pool()
-    app.state.db_pool = db_pool
-
-    # 2. Migrations
-    await run_migrations(db_pool)
+    # 1. Database pool & fallback
+    try:
+        db_pool = await create_pool()
+        await run_migrations(db_pool)
+        app.state.db_pool = db_pool
+        app.state.storage_backend = "postgres"
+        logger.info("postgres_backend_ready")
+    except Exception as exc:
+        logger.warning(
+            "postgres_unavailable_fallback_to_embedded_store",
+            error=str(exc),
+            detail="Operating in embedded SQLite+NumPy vector mode",
+        )
+        from backend.services.embedded_store import get_embedded_store
+        db_pool = get_embedded_store()
+        app.state.db_pool = db_pool
+        app.state.storage_backend = "embedded_sqlite"
 
     # 3. Infrastructure clients
     import google.generativeai as genai
@@ -135,7 +146,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # ----- Shutdown -----
     logger.info("application_shutdown_begin")
-    await close_pool(db_pool)
+    if getattr(app.state, "storage_backend", None) == "postgres" and hasattr(app.state, "db_pool"):
+        try:
+            await close_pool(app.state.db_pool)
+        except Exception as exc:
+            logger.warning("postgres_pool_close_failed", error=str(exc))
     logger.info("application_shutdown_complete")
 
 

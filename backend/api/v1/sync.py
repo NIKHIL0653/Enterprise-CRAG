@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import asyncpg
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 
 from backend.core.logging import get_logger
@@ -130,9 +129,22 @@ async def sync_status(request: Request) -> dict[str, Any]:
         - ``total_documents``: Total count of indexed documents.
         - ``total_chunks``: Total count of stored document chunks.
     """
-    pool: asyncpg.Pool = request.app.state.db_pool
+    pool = request.app.state.db_pool
     log = logger.bind(endpoint="sync_status")
     log.debug("fetching_sync_status")
+
+    from backend.services.embedded_store import EmbeddedVectorStore
+
+    if isinstance(pool, EmbeddedVectorStore):
+        docs = await pool.list_documents()
+        total_chunks = sum(d.get("chunk_count", 0) for d in docs)
+        status = {
+            "last_sync_at": docs[0]["synced_at"] if docs else None,
+            "total_documents": len(docs),
+            "total_chunks": total_chunks,
+        }
+        log.info("sync_status_fetched_from_embedded_store", **status)
+        return status
 
     async with pool.acquire() as conn:
         doc_row = await conn.fetchrow(
@@ -156,11 +168,16 @@ async def sync_status(request: Request) -> dict[str, Any]:
 @router.get(
     "/documents",
     summary="List all indexed documents",
-    description="Returns metadata and chunk count for each indexed document in PostgreSQL.",
+    description="Returns metadata and chunk count for each indexed document.",
 )
 async def list_documents(request: Request) -> list[dict[str, Any]]:
     """Return all indexed documents with their chunk counts."""
-    pool: asyncpg.Pool = request.app.state.db_pool
+    pool = request.app.state.db_pool
+    from backend.services.embedded_store import EmbeddedVectorStore
+
+    if isinstance(pool, EmbeddedVectorStore):
+        return await pool.list_documents()
+
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """

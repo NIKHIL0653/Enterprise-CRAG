@@ -40,14 +40,14 @@ class HybridRetriever:
 
     def __init__(
         self,
-        db_pool: asyncpg.Pool,
+        db_pool: Any,
         embedder: Any,
         rrf_k: int = 60,
     ) -> None:
         """Initialise the retriever.
 
         Args:
-            db_pool: Async connection pool to the PostgreSQL instance with pgvector.
+            db_pool: Async connection pool to PostgreSQL or an EmbeddedVectorStore instance.
             embedder: Embedder instance with an ``embed_query`` coroutine.
             rrf_k: Reciprocal Rank Fusion smoothing constant (default 60).
         """
@@ -303,14 +303,23 @@ class HybridRetriever:
             self._log.error("embedding_failed", error=str(exc))
             raise RetrievalError(f"Query embedding failed: {exc}") from exc
 
-        # 2. Run both searches in parallel using the same connection per search.
-        async with self._pool.acquire() as conn_dense, self._pool.acquire() as conn_sparse:
-            dense_task = self._dense_search(conn_dense, vector, user_email, top_k, doc_ids=doc_ids)
-            sparse_task = self._sparse_search(conn_sparse, query, user_email, top_k, doc_ids=doc_ids)
+        # 2. Run both searches in parallel
+        from backend.services.embedded_store import EmbeddedVectorStore
 
+        if isinstance(self._pool, EmbeddedVectorStore):
+            dense_task = self._pool.dense_search(vector, top_k=top_k, user_email=user_email, doc_ids=doc_ids)
+            sparse_task = self._pool.sparse_search(query, top_k=top_k, user_email=user_email, doc_ids=doc_ids)
             dense_results, sparse_results = await asyncio.gather(
                 dense_task, sparse_task, return_exceptions=False
             )
+        else:
+            async with self._pool.acquire() as conn_dense, self._pool.acquire() as conn_sparse:
+                dense_task = self._dense_search(conn_dense, vector, user_email, top_k, doc_ids=doc_ids)
+                sparse_task = self._sparse_search(conn_sparse, query, user_email, top_k, doc_ids=doc_ids)
+
+                dense_results, sparse_results = await asyncio.gather(
+                    dense_task, sparse_task, return_exceptions=False
+                )
 
         self._log.info(
             "retrieve_raw_counts",
