@@ -49,6 +49,26 @@ services:
       timeout: 10s
       retries: 3
 
+  # ─────────────────────────────────────────────
+  # WorkspaceRAG Streamlit Frontend UI
+  # ─────────────────────────────────────────────
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: workspace_rag_ui
+    restart: unless-stopped
+    command: ["streamlit", "run", "streamlit_app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    environment:
+      - API_BASE=http://api:8000
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./streamlit_app.py:/app/streamlit_app.py
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   postgres_data:
     driver: local
