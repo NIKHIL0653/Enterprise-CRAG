@@ -6,6 +6,7 @@ bytes (PDF, Word DOCX, Markdown, plain text).
 
 from __future__ import annotations
 
+import csv
 import io
 import xml.etree.ElementTree as ET
 import zipfile
@@ -47,32 +48,100 @@ def parse_pdf_bytes(content: bytes) -> str:
 
 
 def parse_docx_bytes(content: bytes) -> str:
-    """Extract text from Word (.docx) OpenXML archive bytes.
+    """Extract structured text and tables from Word (.docx) OpenXML archive bytes.
 
     Args:
         content: Raw bytes of the .docx file.
 
     Returns:
-        Extracted plain text joined by double newlines.
+        Extracted Markdown string preserving paragraphs and tables.
     """
     if not content:
         return ""
     stream = io.BytesIO(content)
-    with zipfile.ZipFile(stream) as z:
-        if "word/document.xml" not in z.namelist():
-            return ""
-        xml_content = z.read("word/document.xml")
+    try:
+        with zipfile.ZipFile(stream) as z:
+            if "word/document.xml" not in z.namelist():
+                return ""
+            xml_content = z.read("word/document.xml")
+    except Exception as exc:
+        logger.warning("docx_zip_read_failed", error=str(exc))
+        return ""
+
     tree = ET.fromstring(xml_content)
-    paragraphs: list[str] = []
-    for p in tree.iterfind(".//w:p", _WORD_NAMESPACES):
-        texts = [
-            node.text
-            for node in p.iterfind(".//w:t", _WORD_NAMESPACES)
-            if node.text
-        ]
-        if texts:
-            paragraphs.append("".join(texts))
-    return "\n\n".join(paragraphs)
+    body = tree.find(".//w:body", _WORD_NAMESPACES)
+    if body is None:
+        return ""
+
+    blocks: list[str] = []
+    for elem in body:
+        tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+        if tag == "p":
+            texts = [
+                node.text
+                for node in elem.iterfind(".//w:t", _WORD_NAMESPACES)
+                if node.text
+            ]
+            if texts:
+                blocks.append("".join(texts))
+        elif tag == "tbl":
+            rows: list[list[str]] = []
+            for tr in elem.iterfind(".//w:tr", _WORD_NAMESPACES):
+                row_cells: list[str] = []
+                for tc in tr.iterfind(".//w:tc", _WORD_NAMESPACES):
+                    cell_text = "".join(
+                        node.text
+                        for node in tc.iterfind(".//w:t", _WORD_NAMESPACES)
+                        if node.text
+                    ).strip()
+                    row_cells.append(cell_text.replace("|", "\\|"))
+                if row_cells and any(row_cells):
+                    rows.append(row_cells)
+
+            if rows:
+                col_count = max(len(r) for r in rows)
+                padded = [r + [""] * (col_count - len(r)) for r in rows]
+                tbl_lines = [
+                    "| " + " | ".join(padded[0]) + " |",
+                    "| " + " | ".join(["---"] * col_count) + " |",
+                ]
+                for row in padded[1:]:
+                    tbl_lines.append("| " + " | ".join(row) + " |")
+                blocks.append("\n".join(tbl_lines))
+
+    return "\n\n".join(blocks)
+
+
+def parse_csv_bytes(content: bytes) -> str:
+    """Extract CSV bytes into a clean GitHub Flavored Markdown table.
+
+    Args:
+        content: Raw binary CSV bytes.
+
+    Returns:
+        Structured Markdown table string.
+    """
+    if not content:
+        return ""
+    text = content.decode("utf-8", errors="replace")
+    reader = csv.reader(io.StringIO(text))
+    rows: list[list[str]] = []
+    for r in reader:
+        if r and any(cell.strip() for cell in r):
+            rows.append([cell.strip().replace("|", "\\|") for cell in r])
+
+    if not rows:
+        return ""
+
+    col_count = max(len(r) for r in rows)
+    padded = [r + [""] * (col_count - len(r)) for r in rows]
+    table_lines = [
+        "| " + " | ".join(padded[0]) + " |",
+        "| " + " | ".join(["---"] * col_count) + " |",
+    ]
+    for row in padded[1:]:
+        table_lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(table_lines)
 
 
 def parse_bytes_to_markdown(
@@ -102,6 +171,10 @@ def parse_bytes_to_markdown(
         mime_type in (DOCX_MIME, "application/msword")
         or lower_fn.endswith(".docx")
     )
+    is_csv = (
+        mime_type in ("text/csv", "application/csv")
+        or lower_fn.endswith(".csv")
+    )
 
     if is_pdf:
         try:
@@ -117,7 +190,14 @@ def parse_bytes_to_markdown(
             logger.warning("docx_parsing_failed", filename=filename, error=str(exc))
             return ""
 
-    # Default: text, markdown, csv, json, code
+    if is_csv:
+        try:
+            return parse_csv_bytes(content)
+        except Exception as exc:
+            logger.warning("csv_parsing_failed", filename=filename, error=str(exc))
+            return ""
+
+    # Default: text, markdown, json, code
     if isinstance(content, bytes):
         return content.decode("utf-8", errors="replace")
     return str(content)

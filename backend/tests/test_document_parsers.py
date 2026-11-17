@@ -9,6 +9,7 @@ import zipfile
 from datetime import datetime, timezone
 
 from backend.ingestion.chunker import SemanticMarkdownChunker
+from backend.ingestion.parsers import parse_bytes_to_markdown, parse_csv_bytes, parse_docx_bytes
 from backend.models.document import Document
 
 
@@ -74,3 +75,51 @@ def test_docx_xml_paragraph_extraction() -> None:
     extracted = "\n\n".join(paragraphs)
     assert "## Employee Code of Conduct" in extracted
     assert "Employees must act with integrity at all times." in extracted
+
+
+def test_parse_csv_bytes_to_markdown_table() -> None:
+    """Ensure CSV bytes are parsed into clean GitHub Flavored Markdown tables."""
+    csv_bytes = b"Date,Transaction,Amount\n2026-01-01,Office Supplies,$150.00\n2026-01-02,Software License,$300.00\n"
+    table_md = parse_csv_bytes(csv_bytes)
+
+    assert "| Date | Transaction | Amount |" in table_md
+    assert "| --- | --- | --- |" in table_md
+    assert "| 2026-01-01 | Office Supplies | $150.00 |" in table_md
+    assert "| 2026-01-02 | Software License | $300.00 |" in table_md
+
+    # Test via parse_bytes_to_markdown
+    result = parse_bytes_to_markdown(csv_bytes, filename="expenses.csv")
+    assert "| Date | Transaction | Amount |" in result
+
+
+def test_parse_docx_with_table() -> None:
+    """Test Word (.docx) OpenXML parser extracting tables alongside paragraphs."""
+    doc_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">\n'
+        "  <w:body>\n"
+        "    <w:p><w:r><w:t>## Compensation Bands</w:t></w:r></w:p>\n"
+        "    <w:tbl>\n"
+        "      <w:tr>\n"
+        "        <w:tc><w:p><w:r><w:t>Role</w:t></w:r></w:p></w:tc>\n"
+        "        <w:tc><w:p><w:r><w:t>Level</w:t></w:r></w:p></w:tc>\n"
+        "        <w:tc><w:p><w:r><w:t>Base Salary</w:t></w:r></w:p></w:tc>\n"
+        "      </w:tr>\n"
+        "      <w:tr>\n"
+        "        <w:tc><w:p><w:r><w:t>Software Engineer</w:t></w:r></w:p></w:tc>\n"
+        "        <w:tc><w:p><w:r><w:t>L4</w:t></w:r></w:p></w:tc>\n"
+        "        <w:tc><w:p><w:r><w:t>$160,000</w:t></w:r></w:p></w:tc>\n"
+        "      </w:tr>\n"
+        "    </w:tbl>\n"
+        "  </w:body>\n"
+        "</w:document>"
+    )
+    fh = io.BytesIO()
+    with zipfile.ZipFile(fh, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
+        z.writestr("word/document.xml", doc_xml)
+
+    extracted = parse_docx_bytes(fh.getvalue())
+    assert "## Compensation Bands" in extracted
+    assert "| Role | Level | Base Salary |" in extracted
+    assert "| Software Engineer | L4 | $160,000 |" in extracted
+
