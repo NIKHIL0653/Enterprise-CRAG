@@ -82,6 +82,18 @@ if ($apiHealthy) {
 }
 
 # 4. Launch Streamlit UI
-Write-Host "[4/4] Starting Streamlit UI..." -ForegroundColor Yellow
-Write-Host "Access UI at http://localhost:8501" -ForegroundColor Cyan
-streamlit run streamlit_app.py
+Write-Host "[4/4] Opening Streamlit UI in default browser..." -ForegroundColor Yellow
+Write-Host "UI is running at http://localhost:8501" -ForegroundColor Cyan
+try {
+    Start-Process "http://localhost:8501"
+} catch {
+    Write-Host "Please open http://localhost:8501 in your browser." -ForegroundColor Green
+}
+
+Write-Host "`n==========================================" -ForegroundColor Green
+Write-Host "  WorkspaceRAG is live at http://localhost:8501" -ForegroundColor Green
+Write-Host "==========================================" -ForegroundColor Green
+Write-Host "To view container logs:  docker compose logs -f"
+Write-Host "To stop all services:    docker compose down"
+Write-Host "Press Enter to exit this launcher window..."
+$null = Read-Host
