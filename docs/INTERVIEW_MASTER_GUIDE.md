@@ -80,6 +80,20 @@ Here is why each core feature was introduced, what critical problem it solves, a
 
 ---
 
+### Feature 8: Conversational Memory & Antecedent Query Reformulation
+* **What was introduced:** Multi-turn conversational memory via `ChatMessage` turn history. In `intent_route_node`, when conversation history is present, the LLM dynamically condenses follow-up questions (e.g., *"What about part-time contractors?"*) into self-contained, antecedent-resolved search queries (*"What is the remote work equipment stipend for part-time contractors?"*) before retrieval. Prior dialogue turns are also formatted into the generator's prompt.
+* **Problem it solves:** Users interact with enterprise search systems conversationally, asking follow-ups with pronouns (*"it"*, *"them"*, *"that policy"*). Passing pronouns directly into hybrid vector/BM25 retrieval causes catastrophic retrieval failure because the search engine has no access to previous conversation turns.
+* **How it helps:** Decouples the user's conversational interface from the retrieval engine. The search query is rewritten with full entity names and context, guaranteeing high recall while preserving natural multi-turn dialogue.
+
+---
+
+### Feature 9: Multi-Format Document Ingestion & Synthetic Benchmark Generation
+* **What was introduced:** Direct multi-format file ingestion endpoint (`POST /api/v1/sync/upload`) supporting PDF, DOCX, Markdown, and plain text, coupled with an automated synthetic evaluation dataset generator (`generate_dataset.py`) and externalized JSONL benchmarking (`golden_dataset.jsonl`).
+* **Problem it solves:** Production RAG systems cannot depend solely on Google Drive sync or hardcoded evaluation questions. Organizations need to upload local handbooks and run automated benchmarks against questions that reflect their actual ingested corpus.
+* **How it helps:** Parses DOCX (via XML extraction), PDFs, and Markdown into chunked, embedded knowledge. `generate_dataset.py` samples chunks from PostgreSQL and prompts Gemini to synthesize realistic employee Q&As, exporting versioned JSONL datasets and syncing to Langfuse Datasets for continuous regression testing.
+
+---
+
 ## 2. End-to-End System Architecture
 
 ### Architectural Workflow Diagram
@@ -250,6 +264,29 @@ Here is why each core feature was introduced, what critical problem it solves, a
   - Token consumption (prompt tokens, completion tokens, cached tokens).
   - Retrieval performance: count of chunks retrieved, reranking delta scores, relevance grading outcomes.
   - Quality metrics: Faithfulness validation result (boolean), user identity, and citation count.
+
+---
+
+### 3.8 Multi-Format Document Ingestion & Direct Ingestion Pipeline
+- **Page-Level PDF Citations:**
+  - Instead of dumping raw unformatted text, PDF bytes are parsed via `pypdf.PdfReader` injecting `## Page N` headers into the extracted Markdown.
+  - When `SemanticMarkdownChunker` processes the document, each chunk inherits the `Page N` section header, enabling the UI to surface page-specific citations.
+- **Zero-Dependency Word DOCX Parsing:**
+  - Word documents are parsed directly from their internal OpenXML structure (`word/document.xml` within the zip archive) using Python's standard library `xml.etree.ElementTree`.
+  - Zero heavy external document conversion dependencies (LibreOffice, pandoc, or unmaintained binaries).
+- **Direct File Ingestion API & Drag-and-Drop:**
+  - Added `POST /api/v1/sync/upload` accepting multipart file uploads.
+  - Allows zero-credential document indexing for testing, evaluating, and demoing without requiring Google Drive service account setup.
+  - Integrated with the Streamlit sidebar with live chunk count feedback.
+
+---
+
+### 3.9 Multi-Turn Conversational Memory & Query Condensation
+- **The Problem:** In multi-turn dialogue, users frequently ask follow-ups containing ambiguous pronouns or omitted antecedents (e.g. *"Can it be used for an ergonomic desk chair?"* following a question about the remote work equipment stipend). Standard retrieval fails because "it" is unresolved.
+- **The Solution:**
+  - In `intent_route_node`, if `history` is non-empty, Gemini is invoked to reformulate the user's follow-up into a standalone, fully-articulated query (e.g. *"Can the remote work equipment stipend be used for an ergonomic desk chair?"*).
+  - The reformulated query is stored in `state["standalone_question"]` and passed to `retrieve_node` for dense vector search and sparse BM25 retrieval.
+  - In `generate_answer_node`, prior conversation turns are injected under `### Prior Conversation` so the generated response flows naturally while citing source chunks.
 
 ---
 
@@ -465,6 +502,26 @@ We solved this through a four-part telemetry architecture:
    - Strip inline `[Doc: ..., §...]` repetitions while preserving structured citations in the metadata payload.
    - Strip LaTeX `\text{...}` wrappers and math dollar delimiters (`$N = 6$` $\to$ `N = 6`).
    - Format run-on headers into structured markdown bold paragraphs."
+
+---
+
+#### Q18: "How does your system resolve ambiguous pronouns and multi-turn conversational follow-ups without cluttering vector search?"
+**Answer:**
+"In enterprise search, users frequently ask contextual follow-ups such as *'Can it be used for an ergonomic desk chair?'* following a question about the remote work equipment stipend. If passed directly to the retriever, dense and sparse retrieval fails because 'it' has no semantic grounding.
+
+We solve this using **Conversational Query Condensation**:
+1. In `intent_route_node`, if `history` is populated, a lightweight prompt reformulates the user's follow-up into an explicit standalone query (`state["standalone_question"]`) before retrieval: e.g. *'Can the company remote work equipment stipend be used for an ergonomic desk chair?'*.
+2. The standalone query is dispatched to `HybridRetriever` and `CohereReranker`, retrieving the exact relevant chunks.
+3. In `generate_answer_node`, the conversation history is passed alongside the context, allowing the LLM to generate a natural conversational follow-up answer that remains grounded in the newly retrieved citations."
+
+---
+
+#### Q19: "How do you handle multi-page PDFs with page-level citations and Word (.docx) documents without heavy external binary dependencies?"
+**Answer:**
+"Instead of introducing heavy external dependencies (such as LibreOffice, headless Chrome, or Unstructured), we built modular, lightweight standard-library parsers in `backend/ingestion/parsers.py`:
+1. **PDF Page-Level Citations:** Using `pypdf.PdfReader`, each page is extracted and tagged with a Markdown header `## Page N`. When `SemanticMarkdownChunker` processes the document, each chunk inherits the page number in `section_header`, which is surfaced directly in the UI sources drawer as a page-level citation.
+2. **Word (.docx) OpenXML Parser:** A `.docx` file is a standard ZIP archive containing `word/document.xml`. We read the archive into memory using standard library `zipfile`, parse paragraph nodes (`//w:p`) and text nodes (`w:t`) via `xml.etree.ElementTree`, and assemble clean Markdown with zero third-party C-bindings or binary wrappers.
+3. **Direct Upload Endpoint:** We expose `POST /api/v1/sync/upload`, enabling instant indexing of local documents with transactional persistence and automatic cache invalidation."
 
 ---
 
