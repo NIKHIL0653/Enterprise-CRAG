@@ -191,6 +191,7 @@ class EmbeddedVectorStore:
         top_k: int = 15,
         user_email: str | None = None,
         doc_ids: list[str] | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[DocumentChunk]:
         """Perform vectorized cosine similarity search using NumPy."""
         q_vec = np.array(query_vector, dtype=np.float32)
@@ -200,29 +201,40 @@ class EmbeddedVectorStore:
 
         q_unit = q_vec / q_norm
 
+        where_clauses = ["c.embedding IS NOT NULL"]
+        params: list[Any] = []
+
+        if doc_ids:
+            placeholders = ",".join("?" for _ in doc_ids)
+            where_clauses.append(f"c.doc_id IN ({placeholders})")
+            params.extend(doc_ids)
+
+        join_docs = ""
+        mime_type = filters.get("mime_type") if filters else None
+        owner_email = filters.get("owner_email") if filters else None
+
+        if mime_type or owner_email:
+            join_docs = "JOIN documents d ON d.doc_id = c.doc_id"
+            if mime_type:
+                where_clauses.append("d.mime_type = ?")
+                params.append(mime_type)
+            if owner_email:
+                where_clauses.append("d.owner_email = ?")
+                params.append(owner_email)
+
+        where_stmt = " AND ".join(where_clauses)
         with self._lock, self._get_connection() as conn:
-            if doc_ids:
-                placeholders = ",".join("?" for _ in doc_ids)
-                cursor = conn.execute(
-                    f"""
-                    SELECT chunk_id, doc_id, doc_title, source_url, section_header,
-                           content, token_count, chunk_index, allowed_emails, allowed_domain,
-                           embedding, created_at, updated_at
-                    FROM document_chunks
-                    WHERE embedding IS NOT NULL AND doc_id IN ({placeholders});
-                    """,
-                    tuple(doc_ids),
-                )
-            else:
-                cursor = conn.execute(
-                    """
-                    SELECT chunk_id, doc_id, doc_title, source_url, section_header,
-                           content, token_count, chunk_index, allowed_emails, allowed_domain,
-                           embedding, created_at, updated_at
-                    FROM document_chunks
-                    WHERE embedding IS NOT NULL;
-                    """
-                )
+            cursor = conn.execute(
+                f"""
+                SELECT c.chunk_id, c.doc_id, c.doc_title, c.source_url, c.section_header,
+                       c.content, c.token_count, c.chunk_index, c.allowed_emails, c.allowed_domain,
+                       c.embedding, c.created_at, c.updated_at
+                FROM document_chunks c
+                {join_docs}
+                WHERE {where_stmt};
+                """,
+                tuple(params),
+            )
             rows = cursor.fetchall()
 
         if not rows:
@@ -267,6 +279,7 @@ class EmbeddedVectorStore:
         top_k: int = 15,
         user_email: str | None = None,
         doc_ids: list[str] | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[DocumentChunk]:
         """Perform BM25 full-text search via SQLite FTS5."""
         clean_terms = [t for t in query.split() if t.isalnum()]
@@ -274,37 +287,44 @@ class EmbeddedVectorStore:
             return []
 
         fts_query = " OR ".join(f'"{t}"' for t in clean_terms)
+        where_clauses = ["chunks_fts MATCH ?"]
+        params: list[Any] = [fts_query]
 
+        if doc_ids:
+            placeholders = ",".join("?" for _ in doc_ids)
+            where_clauses.append(f"c.doc_id IN ({placeholders})")
+            params.extend(doc_ids)
+
+        join_docs = ""
+        mime_type = filters.get("mime_type") if filters else None
+        owner_email = filters.get("owner_email") if filters else None
+
+        if mime_type or owner_email:
+            join_docs = "JOIN documents d ON d.doc_id = c.doc_id"
+            if mime_type:
+                where_clauses.append("d.mime_type = ?")
+                params.append(mime_type)
+            if owner_email:
+                where_clauses.append("d.owner_email = ?")
+                params.append(owner_email)
+
+        params.append(top_k)
+        where_stmt = " AND ".join(where_clauses)
         with self._lock, self._get_connection() as conn:
-            if doc_ids:
-                placeholders = ",".join("?" for _ in doc_ids)
-                cursor = conn.execute(
-                    f"""
-                    SELECT c.chunk_id, c.doc_id, c.doc_title, c.source_url, c.section_header,
-                           c.content, c.token_count, c.chunk_index, c.allowed_emails, c.allowed_domain,
-                           c.embedding, c.created_at, c.updated_at, bm25(chunks_fts) as rank
-                    FROM chunks_fts f
-                    JOIN document_chunks c ON f.chunk_id = c.chunk_id
-                    WHERE chunks_fts MATCH ? AND c.doc_id IN ({placeholders})
-                    ORDER BY rank ASC
-                    LIMIT ?;
-                    """,
-                    (fts_query, *doc_ids, top_k),
-                )
-            else:
-                cursor = conn.execute(
-                    """
-                    SELECT c.chunk_id, c.doc_id, c.doc_title, c.source_url, c.section_header,
-                           c.content, c.token_count, c.chunk_index, c.allowed_emails, c.allowed_domain,
-                           c.embedding, c.created_at, c.updated_at, bm25(chunks_fts) as rank
-                    FROM chunks_fts f
-                    JOIN document_chunks c ON f.chunk_id = c.chunk_id
-                    WHERE chunks_fts MATCH ?
-                    ORDER BY rank ASC
-                    LIMIT ?;
-                    """,
-                    (fts_query, top_k),
-                )
+            cursor = conn.execute(
+                f"""
+                SELECT c.chunk_id, c.doc_id, c.doc_title, c.source_url, c.section_header,
+                       c.content, c.token_count, c.chunk_index, c.allowed_emails, c.allowed_domain,
+                       c.embedding, c.created_at, c.updated_at, bm25(chunks_fts) as rank
+                FROM chunks_fts f
+                JOIN document_chunks c ON f.chunk_id = c.chunk_id
+                {join_docs}
+                WHERE {where_stmt}
+                ORDER BY rank ASC
+                LIMIT ?;
+                """,
+                tuple(params),
+            )
             rows = cursor.fetchall()
 
         results: list[DocumentChunk] = []

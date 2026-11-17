@@ -101,6 +101,7 @@ class HybridRetriever:
         user_email: str,
         top_k: int,
         doc_ids: list[str] | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[DocumentChunk]:
         """Execute pgvector cosine-distance nearest-neighbour search.
 
@@ -110,6 +111,7 @@ class HybridRetriever:
             user_email: Caller's email address used for access-control filtering.
             top_k: Maximum number of results to return.
             doc_ids: Optional list of document IDs to scope search to.
+            filters: Optional dictionary of metadata filters (e.g. mime_type, owner_email).
 
         Returns:
             Ranked list of ``DocumentChunk`` objects (closest first).
@@ -117,45 +119,46 @@ class HybridRetriever:
         Raises:
             RetrievalError: On any database-level error.
         """
+        where_clauses = [
+            "(c.allowed_emails @> ARRAY[$1]::text[] OR c.allowed_domain IS NOT NULL)"
+        ]
+        params: list[Any] = [user_email, vector, top_k]
+
         if doc_ids:
-            sql = """
-                SELECT
-                    chunk_id, doc_id, doc_title, source_url, section_header,
-                    content, token_count, chunk_index,
-                    allowed_emails, allowed_domain, embedding,
-                    created_at, updated_at
-                FROM document_chunks
-                WHERE
-                    (allowed_emails @> ARRAY[$1]::text[]
-                     OR allowed_domain IS NOT NULL)
-                    AND doc_id = ANY($4::text[])
-                ORDER BY embedding <=> $2
-                LIMIT $3
-            """
-            try:
-                rows = await conn.fetch(sql, user_email, vector, top_k, doc_ids)
-            except Exception as exc:
-                self._log.error("dense_search_failed", error=str(exc))
-                raise RetrievalError(f"Dense search failed: {exc}") from exc
-        else:
-            sql = """
-                SELECT
-                    chunk_id, doc_id, doc_title, source_url, section_header,
-                    content, token_count, chunk_index,
-                    allowed_emails, allowed_domain, embedding,
-                    created_at, updated_at
-                FROM document_chunks
-                WHERE
-                    (allowed_emails @> ARRAY[$1]::text[]
-                     OR allowed_domain IS NOT NULL)
-                ORDER BY embedding <=> $2
-                LIMIT $3
-            """
-            try:
-                rows = await conn.fetch(sql, user_email, vector, top_k)
-            except Exception as exc:
-                self._log.error("dense_search_failed", error=str(exc))
-                raise RetrievalError(f"Dense search failed: {exc}") from exc
+            params.append(doc_ids)
+            where_clauses.append(f"c.doc_id = ANY(${len(params)}::text[])")
+
+        mime_type = filters.get("mime_type") if filters else None
+        owner_email = filters.get("owner_email") if filters else None
+
+        join_docs = ""
+        if mime_type or owner_email:
+            join_docs = "JOIN documents d ON d.doc_id = c.doc_id"
+            if mime_type:
+                params.append(mime_type)
+                where_clauses.append(f"d.mime_type = ${len(params)}")
+            if owner_email:
+                params.append(owner_email)
+                where_clauses.append(f"d.owner_email = ${len(params)}")
+
+        where_stmt = " AND ".join(where_clauses)
+        sql = f"""
+            SELECT
+                c.chunk_id, c.doc_id, c.doc_title, c.source_url, c.section_header,
+                c.content, c.token_count, c.chunk_index,
+                c.allowed_emails, c.allowed_domain, c.embedding,
+                c.created_at, c.updated_at
+            FROM document_chunks c
+            {join_docs}
+            WHERE {where_stmt}
+            ORDER BY c.embedding <=> $2
+            LIMIT $3
+        """
+        try:
+            rows = await conn.fetch(sql, *params)
+        except Exception as exc:
+            self._log.error("dense_search_failed", error=str(exc))
+            raise RetrievalError(f"Dense search failed: {exc}") from exc
 
         return [self._row_to_chunk(r) for r in rows]
 
@@ -166,6 +169,7 @@ class HybridRetriever:
         user_email: str,
         top_k: int,
         doc_ids: list[str] | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[DocumentChunk]:
         """Execute PostgreSQL full-text search with ts_rank ordering.
 
@@ -175,6 +179,7 @@ class HybridRetriever:
             user_email: Caller's email address used for access-control filtering.
             top_k: Maximum number of results to return.
             doc_ids: Optional list of document IDs to scope search to.
+            filters: Optional dictionary of metadata filters (e.g. mime_type, owner_email).
 
         Returns:
             Ranked list of ``DocumentChunk`` objects (highest ts_rank first).
@@ -182,49 +187,48 @@ class HybridRetriever:
         Raises:
             RetrievalError: On any database-level error.
         """
+        where_clauses = [
+            "(c.allowed_emails @> ARRAY[$1]::text[] OR c.allowed_domain IS NOT NULL)",
+            "to_tsvector('english', c.content) @@ plainto_tsquery('english', $2)",
+        ]
+        params: list[Any] = [user_email, query, top_k]
+
         if doc_ids:
-            sql = """
-                SELECT
-                    chunk_id, doc_id, doc_title, source_url, section_header,
-                    content, token_count, chunk_index,
-                    allowed_emails, allowed_domain, embedding,
-                    created_at, updated_at
-                FROM document_chunks
-                WHERE
-                    (allowed_emails @> ARRAY[$1]::text[]
-                     OR allowed_domain IS NOT NULL)
-                    AND to_tsvector('english', content) @@ plainto_tsquery('english', $2)
-                    AND doc_id = ANY($4::text[])
-                ORDER BY
-                    ts_rank(to_tsvector('english', content), plainto_tsquery('english', $2)) DESC
-                LIMIT $3
-            """
-            try:
-                rows = await conn.fetch(sql, user_email, query, top_k, doc_ids)
-            except Exception as exc:
-                self._log.error("sparse_search_failed", error=str(exc))
-                raise RetrievalError(f"Sparse search failed: {exc}") from exc
-        else:
-            sql = """
-                SELECT
-                    chunk_id, doc_id, doc_title, source_url, section_header,
-                    content, token_count, chunk_index,
-                    allowed_emails, allowed_domain, embedding,
-                    created_at, updated_at
-                FROM document_chunks
-                WHERE
-                    (allowed_emails @> ARRAY[$1]::text[]
-                     OR allowed_domain IS NOT NULL)
-                    AND to_tsvector('english', content) @@ plainto_tsquery('english', $2)
-                ORDER BY
-                    ts_rank(to_tsvector('english', content), plainto_tsquery('english', $2)) DESC
-                LIMIT $3
-            """
-            try:
-                rows = await conn.fetch(sql, user_email, query, top_k)
-            except Exception as exc:
-                self._log.error("sparse_search_failed", error=str(exc))
-                raise RetrievalError(f"Sparse search failed: {exc}") from exc
+            params.append(doc_ids)
+            where_clauses.append(f"c.doc_id = ANY(${len(params)}::text[])")
+
+        mime_type = filters.get("mime_type") if filters else None
+        owner_email = filters.get("owner_email") if filters else None
+
+        join_docs = ""
+        if mime_type or owner_email:
+            join_docs = "JOIN documents d ON d.doc_id = c.doc_id"
+            if mime_type:
+                params.append(mime_type)
+                where_clauses.append(f"d.mime_type = ${len(params)}")
+            if owner_email:
+                params.append(owner_email)
+                where_clauses.append(f"d.owner_email = ${len(params)}")
+
+        where_stmt = " AND ".join(where_clauses)
+        sql = f"""
+            SELECT
+                c.chunk_id, c.doc_id, c.doc_title, c.source_url, c.section_header,
+                c.content, c.token_count, c.chunk_index,
+                c.allowed_emails, c.allowed_domain, c.embedding,
+                c.created_at, c.updated_at
+            FROM document_chunks c
+            {join_docs}
+            WHERE {where_stmt}
+            ORDER BY
+                ts_rank(to_tsvector('english', c.content), plainto_tsquery('english', $2)) DESC
+            LIMIT $3
+        """
+        try:
+            rows = await conn.fetch(sql, *params)
+        except Exception as exc:
+            self._log.error("sparse_search_failed", error=str(exc))
+            raise RetrievalError(f"Sparse search failed: {exc}") from exc
 
         return [self._row_to_chunk(r) for r in rows]
 
@@ -269,6 +273,7 @@ class HybridRetriever:
         user_email: str,
         top_k: int,
         doc_ids: list[str] | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[DocumentChunk]:
         """Retrieve and fuse relevant document chunks for *query*.
 
@@ -281,6 +286,7 @@ class HybridRetriever:
             user_email: Email of the requesting user (access control).
             top_k: Number of fused results to return.
             doc_ids: Optional document IDs to scope search to.
+            filters: Optional structured metadata filters (e.g. mime_type, owner_email).
 
         Returns:
             Ranked list of ``DocumentChunk`` objects, most relevant first.
@@ -294,6 +300,7 @@ class HybridRetriever:
             user_email=user_email,
             top_k=top_k,
             doc_ids_count=len(doc_ids) if doc_ids else 0,
+            filters=filters,
         )
 
         # 1. Embed the query.
@@ -307,15 +314,15 @@ class HybridRetriever:
         from backend.services.embedded_store import EmbeddedVectorStore
 
         if isinstance(self._pool, EmbeddedVectorStore):
-            dense_task = self._pool.dense_search(vector, top_k=top_k, user_email=user_email, doc_ids=doc_ids)
-            sparse_task = self._pool.sparse_search(query, top_k=top_k, user_email=user_email, doc_ids=doc_ids)
+            dense_task = self._pool.dense_search(vector, top_k=top_k, user_email=user_email, doc_ids=doc_ids, filters=filters)
+            sparse_task = self._pool.sparse_search(query, top_k=top_k, user_email=user_email, doc_ids=doc_ids, filters=filters)
             dense_results, sparse_results = await asyncio.gather(
                 dense_task, sparse_task, return_exceptions=False
             )
         else:
             async with self._pool.acquire() as conn_dense, self._pool.acquire() as conn_sparse:
-                dense_task = self._dense_search(conn_dense, vector, user_email, top_k, doc_ids=doc_ids)
-                sparse_task = self._sparse_search(conn_sparse, query, user_email, top_k, doc_ids=doc_ids)
+                dense_task = self._dense_search(conn_dense, vector, user_email, top_k, doc_ids=doc_ids, filters=filters)
+                sparse_task = self._sparse_search(conn_sparse, query, user_email, top_k, doc_ids=doc_ids, filters=filters)
 
                 dense_results, sparse_results = await asyncio.gather(
                     dense_task, sparse_task, return_exceptions=False

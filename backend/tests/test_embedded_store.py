@@ -90,8 +90,8 @@ async def test_embedded_store_sparse_search_fts5(temp_store: EmbeddedVectorStore
 @pytest.mark.asyncio
 async def test_embedded_store_document_scoping(temp_store: EmbeddedVectorStore) -> None:
     """Validate that search results can be strictly scoped to specific doc_ids."""
-    await temp_store.upsert_document(doc_id="doc_A", title="Doc A")
-    await temp_store.upsert_document(doc_id="doc_B", title="Doc B")
+    await temp_store.upsert_document(doc_id="doc_A", title="Doc A", mime_type="application/pdf")
+    await temp_store.upsert_document(doc_id="doc_B", title="Doc B", mime_type="text/csv")
 
     c_a = DocumentChunk(
         chunk_id="ca",
@@ -124,6 +124,23 @@ async def test_embedded_store_document_scoping(temp_store: EmbeddedVectorStore) 
     sparse_scoped = await temp_store.sparse_search(query="policy guidelines", top_k=5, doc_ids=["doc_A"])
     assert len(sparse_scoped) == 1
     assert sparse_scoped[0].doc_id == "doc_A"
+
+    # Filter by mime_type using predicate pushdown
+    dense_filtered = await temp_store.dense_search(
+        query_vector=[1.0, 0.0, 0.0, 0.0],
+        top_k=5,
+        filters={"mime_type": "text/csv"},
+    )
+    assert len(dense_filtered) == 1
+    assert dense_filtered[0].doc_id == "doc_B"
+
+    sparse_filtered = await temp_store.sparse_search(
+        query="policy guidelines",
+        top_k=5,
+        filters={"mime_type": "application/pdf"},
+    )
+    assert len(sparse_filtered) == 1
+    assert sparse_filtered[0].doc_id == "doc_A"
 
 
 @pytest.mark.asyncio

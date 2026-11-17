@@ -50,3 +50,9 @@ langfuse_data/
 
 # Ragas cache
 .ragas_cache/
+
+# Local databases
+data/*.db
+*.db
+*.sqlite
+*.sqlite3
