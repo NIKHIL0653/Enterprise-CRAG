@@ -178,7 +178,7 @@ The Streamlit UI is deliberately plain: a clean light theme, a pulsing indicator
 ## Results
 
 - **Latency:** cached queries return in under ~5 ms for exact matches and roughly 400 ms for semantic matches, versus a full multi-step pipeline run for an uncached question.
-- **Cost:** repeated and rephrased questions skip LLM generation and embedding calls altogether.
+- **Cost & Token Economics:** repeated and rephrased questions skip LLM generation and embedding calls altogether. Token usage is harvested from Gemini responses to feed child generation spans in Langfuse Cloud, and exact dollar costs and savings are computed and badged on every answer.
 - **Safety:** two independent guards (relevance before generation, faithfulness after) are designed to prefer an honest fallback over an ungrounded answer.
 - **Security:** retrieval is scoped to each user's Google Workspace permissions at the query level.
 

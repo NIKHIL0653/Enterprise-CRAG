@@ -1,7 +1,9 @@
 import json
 import re
-import urllib.request
+import time
 import urllib.error
+import urllib.request
+
 import streamlit as st
 
 # Configure page with expanded sidebar by default
@@ -142,13 +144,106 @@ st.markdown(
 API_BASE = "http://localhost:8000"
 
 
+def check_backend_online() -> bool:
+    """Check if the local FastAPI backend is responsive."""
+    try:
+        req = urllib.request.Request(f"{API_BASE}/api/v1/query/health")
+        with urllib.request.urlopen(req, timeout=1.0) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+# Curated demo knowledge base used when Docker/backend is offline
+_MOCK_DOCUMENTS = [
+    {
+        "title": "Engineering Onboarding & System Setup",
+        "chunk_count": 14,
+        "source_url": "https://drive.google.com/open?id=demo_eng_onboarding",
+    },
+    {
+        "title": "Company Remote Work & Benefits Policy 2026",
+        "chunk_count": 9,
+        "source_url": "https://drive.google.com/open?id=demo_remote_policy",
+    },
+    {
+        "title": "Production CRAG Architecture & Telemetry Specs",
+        "chunk_count": 18,
+        "source_url": "https://drive.google.com/open?id=demo_crag_specs",
+    },
+]
+
+_MOCK_KNOWLEDGE = {
+    "remote": {
+        "answer": (
+            "The company operates under a flexible remote-first policy for all full-time "
+            "employees. Team members may work fully remotely from anywhere within approved "
+            "timezones or utilize regional co-working hubs.\n\n"
+            "Key benefits include:\n"
+            "- **Home Office Stipend:** $1,500 annual allowance for desk, chair, and ergonomic equipment.\n"
+            "- **Internet & Utility Subsidy:** $75 monthly recurring reimbursement.\n"
+            "- **Core Collaboration Hours:** 10:00 AM to 3:00 PM EST for synchronous meetings."
+        ),
+        "citations": [
+            {
+                "doc_title": "Company Remote Work & Benefits Policy 2026",
+                "source_url": "https://drive.google.com/open?id=demo_remote_policy",
+                "section_header": "Workplace Flexibility > Stipends & Equipment",
+                "excerpt": "Full-time employees receive a $1,500 annual home office allowance and $75/mo internet subsidy...",
+            }
+        ],
+        "tokens": 284,
+        "cost_usd": 0.000028,
+    },
+    "onboarding": {
+        "answer": (
+            "New engineering hires complete a structured 2-week onboarding roadmap:\n\n"
+            "1. **Week 1 (Environment & Provisioning):** Hardware provisioning, GitHub organization access, "
+            "and 1-on-1 pairing with a dedicated onboarding buddy.\n"
+            "2. **Week 2 (First Pull Request):** Local Docker container setup, reproducing unit test suites, "
+            "and deploying a starter bugfix to the staging environment."
+        ),
+        "citations": [
+            {
+                "doc_title": "Engineering Onboarding & System Setup",
+                "source_url": "https://drive.google.com/open?id=demo_eng_onboarding",
+                "section_header": "Developer Milestones > Two-Week Roadmap",
+                "excerpt": "New engineers complete local setup and merge a first PR within their initial 10 business days...",
+            }
+        ],
+        "tokens": 312,
+        "cost_usd": 0.000031,
+    },
+    "architecture": {
+        "answer": (
+            "WorkspaceRAG is a Corrective RAG (CRAG) system built with Python 3.11, FastAPI, "
+            "PostgreSQL 16 (pgvector), and Google Gemini. Key pillars include:\n\n"
+            "- **Hybrid Search:** Combines 768-dimensional dense vectors with BM25 full-text search via Reciprocal Rank Fusion (RRF).\n"
+            "- **Two-Stage Reranking:** Cohere cross-encoder reranks top-15 retrieved candidates down to top-5.\n"
+            "- **Two-Tier Caching:** Tier 1 SHA-256 exact hash (<2ms) and Tier 2 pgvector cosine distance (<=0.16 threshold).\n"
+            "- **Cost Observability:** Gemini token usage harvested from response metadata, emitting child generation spans in Langfuse."
+        ),
+        "citations": [
+            {
+                "doc_title": "Production CRAG Architecture & Telemetry Specs",
+                "source_url": "https://drive.google.com/open?id=demo_crag_specs",
+                "section_header": "Architecture Overview > Core Components",
+                "excerpt": "Hybrid retrieval with Reciprocal Rank Fusion and Langfuse OTel distributed tracing...",
+            }
+        ],
+        "tokens": 420,
+        "cost_usd": 0.000039,
+    },
+}
+
+
 def clean_text(text: str) -> str:
     """Clean unwanted formatting, repetitive inline citations, and awkward math tags."""
     if not text:
         return ""
     # 1. Remove repetitive inline [Doc: ..., §...] tags
     cleaned = re.sub(r'\[Doc:\s*[^\]]+\]', '', text)
-    
+
     # 2. Clean LaTeX math formatting (e.g. \text{LayerNorm}, $N = 6$, $d_{\text{model}} = 512$)
     # First peel out \text{...} wrappers
     cleaned = re.sub(r'\\text\{([^}]+)\}', r'\1', cleaned)
@@ -156,10 +251,10 @@ def clean_text(text: str) -> str:
     cleaned = re.sub(r'\$([^$]+)\$', r'\1', cleaned)
     # Clean subscripts like d_{\text{model}} -> d_model or d_model
     cleaned = re.sub(r'_\{([^}]+)\}', r'_\1', cleaned)
-    
+
     # 3. Add clean line breaks before embedded section headings (e.g. ". Encoder Stack:" -> "\n\n**Encoder Stack**:")
     cleaned = re.sub(r'(?<=[.!?])\s+([A-Z][A-Za-z\s]{2,25}:)', r'\n\n**\1**', cleaned)
-    
+
     # 4. Normalize multiple whitespace and clean punctuation spacing
     cleaned = re.sub(r'[ \t]+', ' ', cleaned)
     cleaned = re.sub(r'\s+([.,;:!?])', r'\1', cleaned)
@@ -172,7 +267,7 @@ def fetch_documents():
     try:
         url = f"{API_BASE}/api/v1/sync/documents"
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
             if resp.status == 200:
                 return json.loads(resp.read().decode("utf-8"))
     except Exception:
@@ -195,17 +290,31 @@ def trigger_sync():
 
 # ── COMPACT FIXED SIDE PANEL: INDEXED DOCUMENTS ─────────────────────────────
 with st.sidebar:
+    backend_is_live = check_backend_online()
+    if backend_is_live:
+        st.markdown(
+            '<div style="font-size: 0.72rem; color: #16a34a; font-weight: 500; margin-bottom: 8px;">'
+            '● Live Backend Connected</div>',
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            '<div style="font-size: 0.72rem; color: #d97706; font-weight: 500; margin-bottom: 8px;">'
+            '● Demo Mode (Docker Offline)</div>',
+            unsafe_allow_html=True
+        )
+
     st.markdown('<div class="sidebar-header">Indexed Documents</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-caption">Documents in memory available for search.</div>', unsafe_allow_html=True)
 
-    docs = fetch_documents()
+    docs = fetch_documents() if backend_is_live else _MOCK_DOCUMENTS
 
     if docs:
         for doc in docs:
             title = doc.get("title", "Untitled Document")
             chunks = doc.get("chunk_count", 0)
             url = doc.get("source_url", "")
-            
+
             link_html = f' · <a href="{url}" target="_blank">Drive</a>' if url else ''
             st.markdown(
                 f"""
@@ -292,6 +401,53 @@ for msg in st.session_state.messages:
             if parts:
                 st.caption(" · ".join(parts))
 
+def _generate_mock_response(query: str) -> tuple[str, list[dict], dict]:
+    """Generate realistic mock response and telemetry simulating the CRAG pipeline."""
+    normalized = query.lower().strip()
+
+    if "asked_queries" not in st.session_state:
+        st.session_state.asked_queries = set()
+
+    is_cache_hit = normalized in st.session_state.asked_queries
+    st.session_state.asked_queries.add(normalized)
+
+    topic = "architecture"
+    if any(k in normalized for k in ["remote", "work", "pto", "leave", "stipend", "policy", "benefit"]):
+        topic = "remote"
+    elif any(k in normalized for k in ["onboard", "hire", "start", "first week", "setup", "laptop"]):
+        topic = "onboarding"
+    elif any(k in normalized for k in ["arch", "tech", "langfuse", "rag", "crag", "rrf", "cohere", "pgvector", "cache"]):
+        topic = "architecture"
+
+    entry = _MOCK_KNOWLEDGE.get(topic, _MOCK_KNOWLEDGE["architecture"])
+    answer = entry["answer"]
+    citations = entry["citations"]
+    tokens = entry["tokens"]
+    cost_usd = entry["cost_usd"]
+
+    if is_cache_hit:
+        meta = {
+            "latency_ms": 11,
+            "cache_hit": "exact",
+            "tokens_saved": tokens,
+            "cost_saved_usd": round(tokens * 0.000075 / 1000, 6),
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "citations": citations,
+        }
+    else:
+        meta = {
+            "latency_ms": 230,
+            "cache_hit": None,
+            "tokens_saved": 0,
+            "cost_saved_usd": 0.0,
+            "total_tokens": tokens,
+            "cost_usd": cost_usd,
+            "citations": citations,
+        }
+    return answer, citations, meta
+
+
 # Handle new user input
 prompt = st.chat_input("Ask a question about your documents...")
 
@@ -314,50 +470,60 @@ if prompt:
         meta_payload = None
         citations = []
 
-        try:
-            req_data = json.dumps({
-                "question": prompt,
-                "user_email": user_email.strip() or "rag-bot@personal-portfolio-471613.iam.gserviceaccount.com",
-                "session_id": "streamlit-session"
-            }).encode("utf-8")
+        if not check_backend_online():
+            # Graceful Offline Demo Mode when Docker/backend is offline
+            mock_ans, citations, meta_payload = _generate_mock_response(prompt)
+            words = mock_ans.split(" ")
+            delay = 0.003 if meta_payload.get("cache_hit") else 0.015
+            for word in words:
+                full_raw_text += word + " "
+                message_placeholder.markdown(clean_text(full_raw_text))
+                time.sleep(delay)
+        else:
+            try:
+                req_data = json.dumps({
+                    "question": prompt,
+                    "user_email": user_email.strip() or "rag-bot@personal-portfolio-471613.iam.gserviceaccount.com",
+                    "session_id": "streamlit-session"
+                }).encode("utf-8")
 
-            req = urllib.request.Request(
-                f"{API_BASE}/api/v1/query/",
-                data=req_data,
-                headers={"Content-Type": "application/json"},
-                method="POST"
-            )
+                req = urllib.request.Request(
+                    f"{API_BASE}/api/v1/query/",
+                    data=req_data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST"
+                )
 
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                for line in resp:
-                    decoded = line.decode("utf-8").strip()
-                    if not decoded or not decoded.startswith("data: "):
-                        continue
-
-                    data = decoded[6:].strip()
-                    if data == "[DONE]":
-                        continue
-
-                    # Check for JSON metadata frame
-                    if data.startswith("{") and ("citations" in data or "cache_hit" in data):
-                        try:
-                            meta_payload = json.loads(data)
-                            citations = meta_payload.get("citations", [])
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    for line in resp:
+                        decoded = line.decode("utf-8").strip()
+                        if not decoded or not decoded.startswith("data: "):
                             continue
-                        except Exception:
-                            pass
 
-                    # Accumulate token
-                    full_raw_text += data + " "
-                    # Display cleaned streaming text
-                    message_placeholder.markdown(clean_text(full_raw_text))
+                        data = decoded[6:].strip()
+                        if data == "[DONE]":
+                            continue
 
-        except urllib.error.URLError as e:
-            full_raw_text = f"Connection error: {e.reason}"
-            message_placeholder.markdown(full_raw_text)
-        except Exception as e:
-            full_raw_text = f"Error: {str(e)}"
-            message_placeholder.markdown(full_raw_text)
+                        # Check for JSON metadata frame
+                        if data.startswith("{") and ("citations" in data or "cache_hit" in data):
+                            try:
+                                meta_payload = json.loads(data)
+                                citations = meta_payload.get("citations", [])
+                                continue
+                            except Exception:
+                                pass
+
+                        # Accumulate token
+                        full_raw_text += data + " "
+                        # Display cleaned streaming text
+                        message_placeholder.markdown(clean_text(full_raw_text))
+
+            except urllib.error.URLError as e:
+                full_raw_text = f"Connection error: {e.reason}"
+                message_placeholder.markdown(full_raw_text)
+            except Exception as e:
+                full_raw_text = f"Error: {str(e)}"
+                message_placeholder.markdown(full_raw_text)
 
         cleaned_final_answer = clean_text(full_raw_text)
         message_placeholder.markdown(cleaned_final_answer)
