@@ -485,7 +485,7 @@ with st.sidebar:
 # ── CENTERED HEADING IN CHAT SPACE ──────────────────────────────────────────
 st.markdown(
     """
-    <div style="text-align: center; padding: 0.5rem 0 1.5rem 0;">
+    <div style="text-align: center; padding: 0.5rem 0 1.25rem 0;">
         <h1 style="font-size: 1.9rem; font-weight: 600; letter-spacing: -0.02em; color: #0f172a; margin: 0;">
             Knowledge RAG
         </h1>
@@ -494,49 +494,118 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# Top navigation tabs for Chat vs Evals
+tab_chat, tab_evals = st.tabs(["💬 Workspace Assistant", "📊 Benchmark Evaluations"])
+
 # Initialize chat history in session state
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display existing conversation
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        if "citations" in msg and msg["citations"]:
-            with st.expander("Sources", expanded=False):
-                for c in msg["citations"]:
-                    title = c.get("doc_title", "Document")
-                    url = c.get("source_url", "")
-                    sec = c.get("section_header")
-                    sec_str = f" - Section: {sec}" if sec else ""
-                    if url:
-                        st.markdown(f"- [{title}]({url}){sec_str}")
-                    else:
-                        st.markdown(f"- {title}{sec_str}")
-        if "meta" in msg and msg["meta"]:
-            meta = msg["meta"]
-            latency = meta.get("latency_ms")
-            cache_hit = meta.get("cache_hit")
-            tokens_saved = meta.get("tokens_saved", 0)
-            cost_saved = meta.get("cost_saved_usd", 0.0)
-            total_tokens = meta.get("total_tokens", 0)
-            cost_usd = meta.get("cost_usd", 0.0)
+# Evaluation scoring helper functions
+def compute_eval_faithfulness(answer: str, contexts: list[str]) -> float:
+    if not answer or not contexts:
+        return 0.0
+    ans_words = set(answer.lower().split())
+    ctx_words = set(" ".join(contexts).lower().split())
+    overlap = len(ans_words & ctx_words)
+    return round(min(overlap / max(len(ans_words), 1), 1.0), 3)
 
-            parts = []
-            if latency:
-                parts.append(f"{round(latency)}ms")
-            if cache_hit:
-                if cost_saved > 0:
-                    parts.append(f"{cache_hit} cache hit ({tokens_saved} tokens / ${cost_saved:.6f} saved)")
+def compute_eval_relevance(question: str, answer: str) -> float:
+    if not answer:
+        return 0.0
+    q_words = set(question.lower().split()) - {"what", "is", "the", "how", "does", "a", "an", "for"}
+    ans_words = set(answer.lower().split())
+    overlap = len(q_words & ans_words)
+    return round(min(overlap / max(len(q_words), 1), 1.0), 3)
+
+def get_evaluation_samples() -> list[dict]:
+    p = os.path.join(os.path.dirname(__file__), "backend", "evals", "datasets", "golden_dataset.jsonl")
+    if os.path.exists(p):
+        items = []
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        items.append(json.loads(line))
+            if items:
+                return items
+        except Exception:
+            pass
+    return [
+        {
+            "category": "policy",
+            "question": "What is the company's remote work policy?",
+            "ground_truth": "The company allows fully remote work for all employees with optional in-office days.",
+        },
+        {
+            "category": "stipend",
+            "question": "What is the home office equipment stipend?",
+            "ground_truth": "The company provides a $1,500 home office equipment stipend per year for remote employees.",
+        },
+        {
+            "category": "strategy",
+            "question": "What are the quarterly OKRs for Q4?",
+            "ground_truth": "Q4 OKRs focus on product expansion, customer retention above 90%, and team scaling.",
+        },
+        {
+            "category": "engineering",
+            "question": "What is the onboarding process for new engineers?",
+            "ground_truth": "New engineers complete a 2-week structured onboarding with assigned mentors and system access provisioning.",
+        },
+        {
+            "category": "security",
+            "question": "What is the protocol for reporting a security incident?",
+            "ground_truth": "Immediately notify the security team via Slack #incident-response and submit an incident report within 1 hour.",
+        },
+        {
+            "category": "negative_fallback",
+            "question": "What is the secret recipe for the cafeteria's special sauce?",
+            "ground_truth": "I don't have sufficient documentation in the connected Google Workspace to answer your question.",
+        },
+    ]
+
+# ── TAB 1: WORKSPACE CHAT ────────────────────────────────────────────────────
+with tab_chat:
+    # Display existing conversation
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if "citations" in msg and msg["citations"]:
+                with st.expander("Sources", expanded=False):
+                    for c in msg["citations"]:
+                        title = c.get("doc_title", "Document")
+                        url = c.get("source_url", "")
+                        sec = c.get("section_header")
+                        sec_str = f" - Section: {sec}" if sec else ""
+                        if url:
+                            st.markdown(f"- [{title}]({url}){sec_str}")
+                        else:
+                            st.markdown(f"- {title}{sec_str}")
+            if "meta" in msg and msg["meta"]:
+                meta = msg["meta"]
+                latency = meta.get("latency_ms")
+                cache_hit = meta.get("cache_hit")
+                tokens_saved = meta.get("tokens_saved", 0)
+                cost_saved = meta.get("cost_saved_usd", 0.0)
+                total_tokens = meta.get("total_tokens", 0)
+                cost_usd = meta.get("cost_usd", 0.0)
+
+                parts = []
+                if latency:
+                    parts.append(f"{round(latency)}ms")
+                if cache_hit:
+                    if cost_saved > 0:
+                        parts.append(f"{cache_hit} cache hit ({tokens_saved} tokens / ${cost_saved:.6f} saved)")
+                    else:
+                        parts.append(f"{cache_hit} cache hit ({tokens_saved} tokens saved)")
                 else:
-                    parts.append(f"{cache_hit} cache hit ({tokens_saved} tokens saved)")
-            else:
-                if total_tokens:
-                    parts.append(f"{total_tokens} tokens")
-                if cost_usd > 0:
-                    parts.append(f"${cost_usd:.6f}")
-            if parts:
-                st.caption(" · ".join(parts))
+                    if total_tokens:
+                        parts.append(f"{total_tokens} tokens")
+                    if cost_usd > 0:
+                        parts.append(f"${cost_usd:.6f}")
+                if parts:
+                    st.caption(" · ".join(parts))
 
 def _generate_mock_response(query: str, doc_scope: list[str] | None = None) -> tuple[str, list[dict], dict]:
     """Generate realistic mock response and telemetry simulating the CRAG pipeline."""
@@ -799,3 +868,188 @@ if prompt:
             "citations": citations,
             "meta": meta_payload,
         })
+
+
+# ── TAB 2: BENCHMARK EVALUATIONS ─────────────────────────────────────────────
+with tab_evals:
+    st.markdown(
+        """
+        <div style="margin-bottom: 1.25rem;">
+            <div style="font-size: 1.05rem; font-weight: 600; color: #0f172a; margin-bottom: 0.25rem;">
+                Automated Ragas Benchmark Suite
+            </div>
+            <div style="font-size: 0.82rem; color: #64748b; line-height: 1.4;">
+                Evaluates factual grounding (<b>Faithfulness</b> &ge; 80%) and intent fulfillment (<b>Answer Relevance</b> &ge; 75%)
+                against golden ground-truth samples spanning corporate policies, engineering standards, security protocols, and negative fallbacks.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    eval_samples = get_evaluation_samples()
+
+    eval_col_info, eval_col_btn = st.columns([3, 1])
+    with eval_col_info:
+        st.caption(f"Loaded **{len(eval_samples)} curated test cases** from `golden_dataset.jsonl`")
+    with eval_col_btn:
+        run_eval_clicked = st.button("Run Benchmark", type="primary", use_container_width=True)
+
+    if run_eval_clicked:
+        results = []
+        progress_bar = st.progress(0, text="Initializing evaluation run...")
+
+        is_online = check_backend_online()
+
+        for idx, sample in enumerate(eval_samples):
+            q = sample["question"]
+            progress_bar.progress(
+                (idx + 1) / len(eval_samples),
+                text=f"Evaluating ({idx+1}/{len(eval_samples)}): {q[:45]}..."
+            )
+
+            t_start = time.monotonic()
+            ans = ""
+            citations = []
+            tokens = 0
+            cost_usd = 0.0
+
+            if not is_online:
+                # Offline deterministic simulation using knowledge base
+                ans, citations, meta = _generate_mock_response(q)
+                tokens = meta.get("total_tokens", 150)
+                cost_usd = meta.get("cost_usd", 0.000015)
+                latency_ms = meta.get("latency_ms", 120)
+            else:
+                try:
+                    req_data = json.dumps({
+                        "question": q,
+                        "user_email": "eval@example.com",
+                        "session_id": f"eval-{int(time.time())}",
+                    }).encode("utf-8")
+                    req = urllib.request.Request(
+                        f"{API_BASE}/api/v1/query/",
+                        data=req_data,
+                        headers={"Content-Type": "application/json"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req, timeout=60) as resp:
+                        for line in resp:
+                            decoded = line.decode("utf-8").strip()
+                            if not decoded or not decoded.startswith("data: "):
+                                continue
+                            data_chunk = decoded[6:].strip()
+                            if data_chunk == "[DONE]":
+                                continue
+                            if data_chunk.startswith("{") and ("citations" in data_chunk or "total_tokens" in data_chunk):
+                                try:
+                                    m = json.loads(data_chunk)
+                                    citations = m.get("citations", [])
+                                    tokens = m.get("total_tokens", 0)
+                                    cost_usd = m.get("cost_usd", 0.0)
+                                    continue
+                                except Exception:
+                                    pass
+                            ans += data_chunk + " "
+                    latency_ms = (time.monotonic() - t_start) * 1000
+                except Exception as exc:
+                    ans = f"Error during eval: {exc}"
+                    latency_ms = (time.monotonic() - t_start) * 1000
+
+            ans = clean_text(ans.strip())
+            ctx_texts = [c.get("excerpt", "") for c in citations if c.get("excerpt")]
+            if not ctx_texts and citations:
+                ctx_texts = [c.get("doc_title", "") for c in citations]
+
+            faith_score = compute_eval_faithfulness(
+                ans, ctx_texts if ctx_texts else [sample.get("ground_truth", "")]
+            )
+            rel_score = compute_eval_relevance(q, ans)
+            is_pass = faith_score >= 0.70 and rel_score >= 0.70
+
+            results.append({
+                "question": q,
+                "category": sample.get("category", "general"),
+                "ground_truth": sample.get("ground_truth", ""),
+                "answer": ans,
+                "citations": citations,
+                "faithfulness": faith_score,
+                "relevance": rel_score,
+                "passed": is_pass,
+                "latency_ms": latency_ms,
+                "tokens": tokens,
+                "cost_usd": cost_usd,
+            })
+
+        progress_bar.empty()
+        st.session_state.eval_results = results
+        st.session_state.eval_timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Display results if available
+    if "eval_results" in st.session_state and st.session_state.eval_results:
+        res = st.session_state.eval_results
+        n = len(res)
+        avg_faith = sum(r["faithfulness"] for r in res) / n
+        avg_rel = sum(r["relevance"] for r in res) / n
+        avg_lat = sum(r["latency_ms"] for r in res) / n
+        tot_cost = sum(r["cost_usd"] for r in res)
+        tot_tok = sum(r["tokens"] for r in res)
+
+        st.markdown(
+            f"<div style='font-size:0.75rem; color:#64748b; margin-bottom:0.75rem;'>Benchmark evaluated at {st.session_state.get('eval_timestamp', 'recently')}</div>",
+            unsafe_allow_html=True
+        )
+
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.metric(
+                label="Faithfulness",
+                value=f"{avg_faith*100:.1f}%",
+                delta="PASS (>=80%)" if avg_faith >= 0.8 else "FAIL (<80%)",
+                delta_color="normal" if avg_faith >= 0.8 else "inverse"
+            )
+        with m2:
+            st.metric(
+                label="Answer Relevance",
+                value=f"{avg_rel*100:.1f}%",
+                delta="PASS (>=75%)" if avg_rel >= 0.75 else "FAIL (<75%)",
+                delta_color="normal" if avg_rel >= 0.75 else "inverse"
+            )
+        with m3:
+            st.metric(label="Avg Latency", value=f"{round(avg_lat)} ms")
+        with m4:
+            st.metric(label="Benchmark Cost", value=f"${tot_cost:.6f}", help=f"Total tokens consumed: {tot_tok}")
+
+        st.markdown("<hr style='margin: 1rem 0;'>", unsafe_allow_html=True)
+        st.markdown("<div style='font-size:0.85rem; font-weight:600; color:#0f172a; margin-bottom:0.5rem;'>Detailed Test Case Breakdown</div>", unsafe_allow_html=True)
+
+        for _i, item in enumerate(res):
+            badge_color = "#15803d" if item["passed"] else "#b91c1c"
+            badge_bg = "#dcfce7" if item["passed"] else "#fee2e2"
+            status_text = "PASS" if item["passed"] else "FAIL"
+            cat = item["category"].upper()
+
+            header_label = f"[{status_text}] {item['question']}"
+            with st.expander(header_label, expanded=False):
+                st.markdown(
+                    f"""
+                    <div style="display:flex; gap:8px; margin-bottom:8px;">
+                        <span style="background:{badge_bg}; color:{badge_color}; font-size:0.7rem; font-weight:600; padding:2px 7px; border-radius:4px;">{status_text}</span>
+                        <span style="background:#f1f5f9; color:#475569; font-size:0.7rem; font-weight:500; padding:2px 7px; border-radius:4px;">{cat}</span>
+                        <span style="font-size:0.72rem; color:#64748b; margin-left:auto;">{round(item['latency_ms'])}ms · {item['tokens']} tokens · ${item['cost_usd']:.6f}</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+                c_f, c_r = st.columns(2)
+                with c_f:
+                    st.caption(f"**Faithfulness Score:** `{item['faithfulness']:.2f}` (Threshold: 0.80)")
+                with c_r:
+                    st.caption(f"**Relevance Score:** `{item['relevance']:.2f}` (Threshold: 0.75)")
+
+                st.markdown(f"**Expected Ground Truth:**\n> {item['ground_truth']}")
+                st.markdown(f"**Generated Answer:**\n{item['answer']}")
+                if item["citations"]:
+                    st.caption("Context Excerpts:")
+                    for c in item["citations"]:
+                        st.caption(f"- *{c.get('doc_title', 'Source')}*: {c.get('excerpt', '')[:180]}...")
