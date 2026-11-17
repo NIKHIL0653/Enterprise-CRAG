@@ -25,6 +25,13 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from backend.models.document import DocumentChunk
 
 
+class ChatMessage(BaseModel):
+    """A single turn in a multi-turn conversation."""
+
+    role: str = Field(..., description="Role of the sender ('user' or 'assistant').")
+    content: str = Field(..., description="Message text content.")
+
+
 class QueryRequest(BaseModel):
     """Validated inbound query from an authenticated user.
 
@@ -35,6 +42,7 @@ class QueryRequest(BaseModel):
             enforcement during retrieval.
         session_id: Optional opaque identifier for a conversation session.
             If omitted, the backend generates a fresh UUID for the response.
+        history: Prior conversation turns used to resolve pronouns and context.
     """
 
     question: str = Field(
@@ -50,6 +58,10 @@ class QueryRequest(BaseModel):
     session_id: str | None = Field(
         default=None,
         description="Existing conversation session ID, or None to start a new one.",
+    )
+    history: list[ChatMessage] = Field(
+        default_factory=list,
+        description="Prior conversation turns for context-aware multi-turn retrieval.",
     )
 
     @field_validator("question")
@@ -173,7 +185,9 @@ class RAGState(TypedDict, total=False):
     """
 
     question: str
+    standalone_question: str
     user_email: str
+    history: list[dict[str, str]]
     retrieved_docs: list[DocumentChunk]
     relevant_docs: list[DocumentChunk]
     answer: str
