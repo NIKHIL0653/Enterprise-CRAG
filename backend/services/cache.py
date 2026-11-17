@@ -116,7 +116,8 @@ def _canonical_normalize(question: str) -> str:
         r"^(can you please |please |can you |tell me about |what is |what are |"
         r"what was |what were |explain |describe |how does |what does |give me |define )\s*"
     )
-    q = re.sub(prefix_pattern, "", q)
+    while re.match(prefix_pattern, q):
+        q = re.sub(prefix_pattern, "", q)
     # Strip articles
     q = re.sub(r"\b(a|an|the)\b", " ", q)
     # Collapse whitespace
@@ -258,6 +259,7 @@ class QueryCacheManager:
                 "answer": row["answer"],
                 "citations": json.loads(row["citations"]) if isinstance(row["citations"], str) else row["citations"],
                 "cache_type": "semantic",
+                "distance": round(float(row["distance"]), 4),
                 "latency_ms": latency_ms,
                 "tokens_saved": row["tokens_used"],
             }
