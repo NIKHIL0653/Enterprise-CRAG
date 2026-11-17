@@ -125,16 +125,18 @@ Instead of blind retrieval-to-generation, the agent follows a self-correcting st
 - **Adaptive Fallback**: If retrieved documents fail the relevance threshold, the pipeline automatically routes to a safe fallback rather than hallucinating an answer.
 - **Automated Faithfulness Verifier**: A dedicated post-generation guardrail verifies that every factual claim in the generated answer is directly grounded in the source text before releasing it to the user.
 
-### 6. Distributed Observability & Tracing (Langfuse)
+### 6. Distributed Observability, Tracing & Token Economics (Langfuse)
 Every query execution creates a distributed trace in Langfuse capturing:
 - Input question and authenticated user identity.
 - Exact latency breakdown per node (retrieval, reranking, grading, generation).
-- Token usage and cost metrics.
+- Granular token economics (`usage_metadata` from Gemini prompt/candidate tokens) and itemized USD pricing.
+- Child generation spans enabling automated cost curves and usage analytics in Langfuse Cloud.
 - Retrieval precision, relevance scores, and faithfulness evaluation results.
 
 ### 7. Clean, Minimalist Streamlit Interface
 - **White Background Theme**: Clean, distraction-free styling designed for enterprise readability.
 - **Fixed Document Memory Inspector**: Anchored sidebar displays currently loaded documents, indexed chunk counts, and direct links to Google Drive.
+- **Live Telemetry Badges**: Displays execution latency, token counts, and itemized USD query costs (as well as tokens and dollars saved on cache hits).
 - **Text & Citation Cleaning Engine**: Removes repetitive inline bracket clutter (`[Doc: ..., §—]`) and converts raw LaTeX artifacts into readable prose, grouping verified sources cleanly in an expandable container.
 - **Minimal Visual Feedback**: Subtle pulsing loading animation provides immediate visual feedback while the knowledge base is searched.
 
