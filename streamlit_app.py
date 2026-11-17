@@ -305,6 +305,57 @@ def trigger_sync():
     return None
 
 
+def export_chat_markdown(messages: list[dict]) -> str:
+    """Format conversation transcript into clean markdown with citations and telemetry."""
+    if not messages:
+        return "# Knowledge RAG Conversation Transcript\n\nNo messages in session.\n"
+
+    lines = ["# Knowledge RAG Conversation Transcript\n"]
+    lines.append(f"Exported: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}\n")
+    lines.append("---\n")
+
+    turn = 1
+    for msg in messages:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        if role == "user":
+            lines.append(f"### Turn {turn} — Question\n")
+            lines.append(f"{content}\n")
+        elif role == "assistant":
+            lines.append(f"**Answer:**\n\n{content}\n")
+            citations = msg.get("citations") or []
+            if citations:
+                lines.append("\n**Sources Cited:**")
+                for c in citations:
+                    title = c.get("doc_title", "Document")
+                    url = c.get("source_url", "")
+                    sec = c.get("section_header")
+                    sec_str = f" - Section: {sec}" if sec else ""
+                    if url:
+                        lines.append(f"- [{title}]({url}){sec_str}")
+                    else:
+                        lines.append(f"- {title}{sec_str}")
+                lines.append("")
+            meta = msg.get("meta") or {}
+            if meta:
+                latency = meta.get("latency_ms")
+                tokens = meta.get("total_tokens")
+                cost = meta.get("cost_usd")
+                parts = []
+                if latency:
+                    parts.append(f"Latency: {round(latency)}ms")
+                if tokens:
+                    parts.append(f"Tokens: {tokens}")
+                if cost:
+                    parts.append(f"Cost: ${cost:.6f}")
+                if parts:
+                    lines.append(f"\n> Telemetry: {' · '.join(parts)}\n")
+            lines.append("---\n")
+            turn += 1
+
+    return "\n".join(lines)
+
+
 # ── COMPACT FIXED SIDE PANEL: INDEXED DOCUMENTS ─────────────────────────────
 with st.sidebar:
     backend_is_live = check_backend_online()
@@ -359,6 +410,16 @@ with st.sidebar:
             else:
                 st.error("Sync failed.")
 
+    st.markdown('<div class="sidebar-header" style="margin-top: 10px;">Filter Scope</div>', unsafe_allow_html=True)
+    doc_options = [d.get("doc_id") for d in docs] if docs else []
+    selected_doc_ids = st.multiselect(
+        "Scope to documents",
+        options=doc_options,
+        format_func=lambda did: next((d.get("title", did) for d in docs if d.get("doc_id") == did), did),
+        help="Optional: Select specific documents to restrict search scope.",
+        label_visibility="collapsed",
+    )
+
     st.markdown('<div class="sidebar-header" style="margin-top: 10px;">Upload Document</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-caption">Upload PDF, DOCX, MD, or TXT.</div>', unsafe_allow_html=True)
     uploaded_file = st.file_uploader(
@@ -402,6 +463,23 @@ with st.sidebar:
         value="rag-bot@personal-portfolio-471613.iam.gserviceaccount.com",
         help="Permissions validated against this email."
     )
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-header">Session Controls</div>', unsafe_allow_html=True)
+    col_clear, col_export = st.columns(2)
+    with col_clear:
+        if st.button("Clear Chat", use_container_width=True):
+            st.session_state.messages = []
+            st.rerun()
+    with col_export:
+        transcript_bytes = export_chat_markdown(st.session_state.get("messages", [])).encode("utf-8")
+        st.download_button(
+            "Export .md",
+            data=transcript_bytes,
+            file_name="rag_chat_transcript.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
 
 
 # ── CENTERED HEADING IN CHAT SPACE ──────────────────────────────────────────
@@ -460,9 +538,39 @@ for msg in st.session_state.messages:
             if parts:
                 st.caption(" · ".join(parts))
 
-def _generate_mock_response(query: str) -> tuple[str, list[dict], dict]:
+def _generate_mock_response(query: str, doc_scope: list[str] | None = None) -> tuple[str, list[dict], dict]:
     """Generate realistic mock response and telemetry simulating the CRAG pipeline."""
     normalized = query.lower().strip()
+
+    if doc_scope:
+        scoped_titles = [
+            d.get("title", "").lower()
+            for d in getattr(st.session_state, "demo_docs", [])
+            if d.get("doc_id") in doc_scope
+        ]
+        is_remote_query = any(k in normalized for k in ["remote", "work", "pto", "leave", "stipend"])
+        is_onboard_query = any(k in normalized for k in ["onboard", "hire", "start", "laptop"])
+        has_match = any(
+            (any(k in t for k in ["remote", "handbook", "policy"]) if is_remote_query
+             else any(k in t for k in ["onboard", "guide"]) if is_onboard_query
+             else True)
+            for t in scoped_titles
+        )
+        if not has_match:
+            scoped_names = ", ".join(f"**{d.get('title')}**" for d in getattr(st.session_state, "demo_docs", []) if d.get("doc_id") in doc_scope)
+            ans = (
+                f"I searched within your selected document(s) ({scoped_names}), "
+                f"but found no relevant sections matching your question: *\"{query}\"*."
+            )
+            return ans, [], {
+                "latency_ms": 110,
+                "cache_hit": None,
+                "tokens_saved": 0,
+                "cost_saved_usd": 0.0,
+                "total_tokens": 120,
+                "cost_usd": 0.000009,
+                "citations": [],
+            }
 
     if "asked_queries" not in st.session_state:
         st.session_state.asked_queries = set()
@@ -580,7 +688,9 @@ if prompt:
 
         if not check_backend_online():
             # Graceful Offline Demo Mode when Docker/backend is offline
-            mock_ans, citations, meta_payload = _generate_mock_response(prompt)
+            mock_ans, citations, meta_payload = _generate_mock_response(
+                prompt, doc_scope=selected_doc_ids if selected_doc_ids else None
+            )
             words = mock_ans.split(" ")
             delay = 0.003 if meta_payload.get("cache_hit") else 0.015
             for word in words:
@@ -600,6 +710,7 @@ if prompt:
                     "user_email": user_email.strip() or "rag-bot@personal-portfolio-471613.iam.gserviceaccount.com",
                     "session_id": "streamlit-session",
                     "history": history_payload,
+                    "doc_ids": selected_doc_ids if selected_doc_ids else None,
                 }).encode("utf-8")
 
                 req = urllib.request.Request(

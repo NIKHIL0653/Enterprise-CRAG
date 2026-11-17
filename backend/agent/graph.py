@@ -213,6 +213,7 @@ class WorkspaceRAGGraph:
         user_email: str,
         session_id: str,
         history: list[dict[str, str]] | list[Any] | None = None,
+        doc_ids: list[str] | None = None,
     ) -> RAGState:
         """Execute the RAG pipeline for a single question.
 
@@ -261,6 +262,7 @@ class WorkspaceRAGGraph:
             "question": question,
             "standalone_question": question,
             "user_email": user_email,
+            "doc_ids": doc_ids,
             "history": serialised_history,
             "retrieved_docs": [],
             "relevant_docs": [],

@@ -235,10 +235,12 @@ async def retrieve_node(
     node_log = log.bind(node="retrieve", question=state["question"], search_query=search_query)
     node_log.info("node_start")
 
+    doc_ids = state.get("doc_ids")
     raw_chunks: list[DocumentChunk] = await retriever.retrieve(
         query=search_query,
         user_email=state["user_email"],
         top_k=settings.TOP_K_RETRIEVAL,
+        doc_ids=doc_ids,
     )
 
     reranked_chunks: list[DocumentChunk] = await reranker.rerank(

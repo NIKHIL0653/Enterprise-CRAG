@@ -80,3 +80,65 @@ async def test_rrf_boosts_chunks_in_both_lists():
     # shared_chunk should beat dense_only because it accumulates score from both lists
     fused_ids = [c.chunk_id for c in fused]
     assert fused_ids.index("shared-001") < fused_ids.index("dense-only-001")
+
+
+@pytest.mark.asyncio
+async def test_retrieve_forwards_doc_ids_to_subsearches() -> None:
+    """Ensure doc_ids parameter is forwarded to both dense and sparse subsearches."""
+    from backend.retrieval.hybrid_retriever import HybridRetriever
+
+    mock_pool = MagicMock()
+    mock_conn = MagicMock()
+    mock_acquire = MagicMock()
+    mock_acquire.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_acquire.__aexit__ = AsyncMock()
+    mock_pool.acquire.return_value = mock_acquire
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed_query = AsyncMock(return_value=[0.1] * 768)
+
+    retriever = HybridRetriever(db_pool=mock_pool, embedder=mock_embedder)
+    retriever._dense_search = AsyncMock(return_value=[])
+    retriever._sparse_search = AsyncMock(return_value=[])
+
+    await retriever.retrieve(
+        query="remote work policy",
+        user_email="alice@acme.com",
+        top_k=5,
+        doc_ids=["doc-remote-1", "doc-remote-2"],
+    )
+
+    retriever._dense_search.assert_awaited_once_with(
+        mock_conn, [0.1] * 768, "alice@acme.com", 5, doc_ids=["doc-remote-1", "doc-remote-2"]
+    )
+    retriever._sparse_search.assert_awaited_once_with(
+        mock_conn, "remote work policy", "alice@acme.com", 5, doc_ids=["doc-remote-1", "doc-remote-2"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_dense_search_includes_doc_ids_filter() -> None:
+    """Ensure _dense_search appends doc_id = ANY($4::text[]) when doc_ids are passed."""
+    from backend.retrieval.hybrid_retriever import HybridRetriever
+
+    mock_pool = MagicMock()
+    mock_conn = AsyncMock()
+    mock_conn.fetch = AsyncMock(return_value=[])
+
+    mock_embedder = MagicMock()
+    retriever = HybridRetriever(db_pool=mock_pool, embedder=mock_embedder)
+
+    await retriever._dense_search(
+        conn=mock_conn,
+        vector=[0.1] * 768,
+        user_email="alice@acme.com",
+        top_k=10,
+        doc_ids=["doc123"],
+    )
+
+    mock_conn.fetch.assert_awaited_once()
+    called_sql = mock_conn.fetch.call_args[0][0]
+    called_args = mock_conn.fetch.call_args[0][1:]
+    assert "doc_id = ANY($4::text[])" in called_sql
+    assert called_args == ("alice@acme.com", [0.1] * 768, 10, ["doc123"])
+

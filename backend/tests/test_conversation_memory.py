@@ -87,6 +87,7 @@ async def test_retrieve_node_uses_standalone_question() -> None:
         query="Can remote work stipend be used for ergonomic desk chair?",
         user_email="alice@acme.com",
         top_k=settings.TOP_K_RETRIEVAL,
+        doc_ids=None,
     )
 
 

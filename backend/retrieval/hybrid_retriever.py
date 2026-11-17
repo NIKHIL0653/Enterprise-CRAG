@@ -100,6 +100,7 @@ class HybridRetriever:
         vector: list[float],
         user_email: str,
         top_k: int,
+        doc_ids: list[str] | None = None,
     ) -> list[DocumentChunk]:
         """Execute pgvector cosine-distance nearest-neighbour search.
 
@@ -108,6 +109,7 @@ class HybridRetriever:
             vector: Query embedding vector.
             user_email: Caller's email address used for access-control filtering.
             top_k: Maximum number of results to return.
+            doc_ids: Optional list of document IDs to scope search to.
 
         Returns:
             Ranked list of ``DocumentChunk`` objects (closest first).
@@ -115,24 +117,45 @@ class HybridRetriever:
         Raises:
             RetrievalError: On any database-level error.
         """
-        sql = """
-            SELECT
-                chunk_id, doc_id, doc_title, source_url, section_header,
-                content, token_count, chunk_index,
-                allowed_emails, allowed_domain, embedding,
-                created_at, updated_at
-            FROM document_chunks
-            WHERE
-                (allowed_emails @> ARRAY[$1]::text[]
-                 OR allowed_domain IS NOT NULL)
-            ORDER BY embedding <=> $2
-            LIMIT $3
-        """
-        try:
-            rows = await conn.fetch(sql, user_email, vector, top_k)
-        except Exception as exc:
-            self._log.error("dense_search_failed", error=str(exc))
-            raise RetrievalError(f"Dense search failed: {exc}") from exc
+        if doc_ids:
+            sql = """
+                SELECT
+                    chunk_id, doc_id, doc_title, source_url, section_header,
+                    content, token_count, chunk_index,
+                    allowed_emails, allowed_domain, embedding,
+                    created_at, updated_at
+                FROM document_chunks
+                WHERE
+                    (allowed_emails @> ARRAY[$1]::text[]
+                     OR allowed_domain IS NOT NULL)
+                    AND doc_id = ANY($4::text[])
+                ORDER BY embedding <=> $2
+                LIMIT $3
+            """
+            try:
+                rows = await conn.fetch(sql, user_email, vector, top_k, doc_ids)
+            except Exception as exc:
+                self._log.error("dense_search_failed", error=str(exc))
+                raise RetrievalError(f"Dense search failed: {exc}") from exc
+        else:
+            sql = """
+                SELECT
+                    chunk_id, doc_id, doc_title, source_url, section_header,
+                    content, token_count, chunk_index,
+                    allowed_emails, allowed_domain, embedding,
+                    created_at, updated_at
+                FROM document_chunks
+                WHERE
+                    (allowed_emails @> ARRAY[$1]::text[]
+                     OR allowed_domain IS NOT NULL)
+                ORDER BY embedding <=> $2
+                LIMIT $3
+            """
+            try:
+                rows = await conn.fetch(sql, user_email, vector, top_k)
+            except Exception as exc:
+                self._log.error("dense_search_failed", error=str(exc))
+                raise RetrievalError(f"Dense search failed: {exc}") from exc
 
         return [self._row_to_chunk(r) for r in rows]
 
@@ -142,6 +165,7 @@ class HybridRetriever:
         query: str,
         user_email: str,
         top_k: int,
+        doc_ids: list[str] | None = None,
     ) -> list[DocumentChunk]:
         """Execute PostgreSQL full-text search with ts_rank ordering.
 
@@ -150,6 +174,7 @@ class HybridRetriever:
             query: Raw text query that will be passed to ``plainto_tsquery``.
             user_email: Caller's email address used for access-control filtering.
             top_k: Maximum number of results to return.
+            doc_ids: Optional list of document IDs to scope search to.
 
         Returns:
             Ranked list of ``DocumentChunk`` objects (highest ts_rank first).
@@ -157,26 +182,49 @@ class HybridRetriever:
         Raises:
             RetrievalError: On any database-level error.
         """
-        sql = """
-            SELECT
-                chunk_id, doc_id, doc_title, source_url, section_header,
-                content, token_count, chunk_index,
-                allowed_emails, allowed_domain, embedding,
-                created_at, updated_at
-            FROM document_chunks
-            WHERE
-                (allowed_emails @> ARRAY[$1]::text[]
-                 OR allowed_domain IS NOT NULL)
-                AND to_tsvector('english', content) @@ plainto_tsquery('english', $2)
-            ORDER BY
-                ts_rank(to_tsvector('english', content), plainto_tsquery('english', $2)) DESC
-            LIMIT $3
-        """
-        try:
-            rows = await conn.fetch(sql, user_email, query, top_k)
-        except Exception as exc:
-            self._log.error("sparse_search_failed", error=str(exc))
-            raise RetrievalError(f"Sparse search failed: {exc}") from exc
+        if doc_ids:
+            sql = """
+                SELECT
+                    chunk_id, doc_id, doc_title, source_url, section_header,
+                    content, token_count, chunk_index,
+                    allowed_emails, allowed_domain, embedding,
+                    created_at, updated_at
+                FROM document_chunks
+                WHERE
+                    (allowed_emails @> ARRAY[$1]::text[]
+                     OR allowed_domain IS NOT NULL)
+                    AND to_tsvector('english', content) @@ plainto_tsquery('english', $2)
+                    AND doc_id = ANY($4::text[])
+                ORDER BY
+                    ts_rank(to_tsvector('english', content), plainto_tsquery('english', $2)) DESC
+                LIMIT $3
+            """
+            try:
+                rows = await conn.fetch(sql, user_email, query, top_k, doc_ids)
+            except Exception as exc:
+                self._log.error("sparse_search_failed", error=str(exc))
+                raise RetrievalError(f"Sparse search failed: {exc}") from exc
+        else:
+            sql = """
+                SELECT
+                    chunk_id, doc_id, doc_title, source_url, section_header,
+                    content, token_count, chunk_index,
+                    allowed_emails, allowed_domain, embedding,
+                    created_at, updated_at
+                FROM document_chunks
+                WHERE
+                    (allowed_emails @> ARRAY[$1]::text[]
+                     OR allowed_domain IS NOT NULL)
+                    AND to_tsvector('english', content) @@ plainto_tsquery('english', $2)
+                ORDER BY
+                    ts_rank(to_tsvector('english', content), plainto_tsquery('english', $2)) DESC
+                LIMIT $3
+            """
+            try:
+                rows = await conn.fetch(sql, user_email, query, top_k)
+            except Exception as exc:
+                self._log.error("sparse_search_failed", error=str(exc))
+                raise RetrievalError(f"Sparse search failed: {exc}") from exc
 
         return [self._row_to_chunk(r) for r in rows]
 
@@ -220,6 +268,7 @@ class HybridRetriever:
         query: str,
         user_email: str,
         top_k: int,
+        doc_ids: list[str] | None = None,
     ) -> list[DocumentChunk]:
         """Retrieve and fuse relevant document chunks for *query*.
 
@@ -231,6 +280,7 @@ class HybridRetriever:
             query: Natural-language query string.
             user_email: Email of the requesting user (access control).
             top_k: Number of fused results to return.
+            doc_ids: Optional document IDs to scope search to.
 
         Returns:
             Ranked list of ``DocumentChunk`` objects, most relevant first.
@@ -238,7 +288,13 @@ class HybridRetriever:
         Raises:
             RetrievalError: If embedding or any database query fails.
         """
-        self._log.info("retrieve_start", query=query, user_email=user_email, top_k=top_k)
+        self._log.info(
+            "retrieve_start",
+            query=query,
+            user_email=user_email,
+            top_k=top_k,
+            doc_ids_count=len(doc_ids) if doc_ids else 0,
+        )
 
         # 1. Embed the query.
         try:
@@ -249,8 +305,8 @@ class HybridRetriever:
 
         # 2. Run both searches in parallel using the same connection per search.
         async with self._pool.acquire() as conn_dense, self._pool.acquire() as conn_sparse:
-            dense_task = self._dense_search(conn_dense, vector, user_email, top_k)
-            sparse_task = self._sparse_search(conn_sparse, query, user_email, top_k)
+            dense_task = self._dense_search(conn_dense, vector, user_email, top_k, doc_ids=doc_ids)
+            sparse_task = self._sparse_search(conn_sparse, query, user_email, top_k, doc_ids=doc_ids)
 
             dense_results, sparse_results = await asyncio.gather(
                 dense_task, sparse_task, return_exceptions=False
