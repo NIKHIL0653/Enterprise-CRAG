@@ -889,9 +889,38 @@ with tab_evals:
 
     eval_samples = get_evaluation_samples()
 
+    # Custom benchmark dataset uploader
+    with st.expander("📂 Upload Custom Benchmark Dataset (.jsonl)", expanded=False):
+        st.markdown(
+            """
+            <div style="font-size: 0.8rem; color: #475569; margin-bottom: 0.5rem;">
+                Upload your own domain-specific <code>.jsonl</code> evaluation set.
+                Each JSON line should contain: <code>{"question": "...", "ground_truth": "...", "category": "..."}</code>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        custom_file = st.file_uploader("Upload custom evaluation JSONL", type=["jsonl"], label_visibility="collapsed")
+        if custom_file is not None:
+            try:
+                uploaded_samples = []
+                for line in custom_file.getvalue().decode("utf-8").splitlines():
+                    line = line.strip()
+                    if line:
+                        uploaded_samples.append(json.loads(line))
+                if uploaded_samples:
+                    st.session_state.custom_eval_samples = uploaded_samples
+                    st.success(f"Loaded {len(uploaded_samples)} custom test cases!")
+            except Exception as e:
+                st.error(f"Failed to parse custom JSONL: {e}")
+
+    # Use custom samples if loaded, otherwise fallback to golden dataset
+    active_eval_samples = st.session_state.get("custom_eval_samples", eval_samples)
+    dataset_label = "custom dataset" if "custom_eval_samples" in st.session_state else "`golden_dataset.jsonl`"
+
     eval_col_info, eval_col_btn = st.columns([3, 1])
     with eval_col_info:
-        st.caption(f"Loaded **{len(eval_samples)} curated test cases** from `golden_dataset.jsonl`")
+        st.caption(f"Loaded **{len(active_eval_samples)} test cases** from {dataset_label}")
     with eval_col_btn:
         run_eval_clicked = st.button("Run Benchmark", type="primary", use_container_width=True)
 
@@ -901,11 +930,11 @@ with tab_evals:
 
         is_online = check_backend_online()
 
-        for idx, sample in enumerate(eval_samples):
+        for idx, sample in enumerate(active_eval_samples):
             q = sample["question"]
             progress_bar.progress(
-                (idx + 1) / len(eval_samples),
-                text=f"Evaluating ({idx+1}/{len(eval_samples)}): {q[:45]}..."
+                (idx + 1) / len(active_eval_samples),
+                text=f"Evaluating ({idx+1}/{len(active_eval_samples)}): {q[:45]}..."
             )
 
             t_start = time.monotonic()
