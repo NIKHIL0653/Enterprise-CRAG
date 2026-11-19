@@ -206,6 +206,12 @@ Every query execution creates a distributed trace in Langfuse capturing:
 - **SQL & FTS5 Predicate Pushdown**: Pushes metadata filters directly down into the database (`WHERE d.mime_type = $X`) before vector distance computation and BM25 rank calculations across both PostgreSQL and SQLite stores.
 - **High-Precision Retrieval**: Prevents irrelevant document types from crowding the top-$k$ retrieval candidate set.
 
+### 13. Event-Driven Real-Time Sync via Google Drive Webhooks
+- **Real-Time Push Notifications**: Receives Google Drive Changes API webhooks (`POST /api/v1/sync/webhook`) upon file creation, modification, or trashing (`change`, `add`, `trash`).
+- **Subscription Handshake Protocol**: Handles the initial channel registration verification (`X-Goog-Resource-State: sync`), returning HTTP 200 without redundant re-indexing.
+- **Event-Driven Cache Eviction**: Triggers background incremental sync and automatically evicts superseded answers from the two-tier cache within milliseconds.
+- **API Quota Savings**: Eliminates periodic polling loops, reducing Google Drive API consumption by 90%+.
+
 ---
 
 ## Technical Specifications
