@@ -26,6 +26,24 @@ _DEFAULT_DB_PATH = Path(__file__).parent.parent.parent / "data" / "embedded_rag.
 class EmbeddedVectorStore:
     """Thread-safe SQLite + NumPy vector store with FTS5 full-text search."""
 
+    def _check_user_permission(
+        self,
+        user_email: str | None,
+        allowed_emails: list[str],
+        allowed_domain: str | None,
+    ) -> bool:
+        """Verify whether user_email is allowed by chunk ACLs."""
+        if not user_email:
+            return True
+        if user_email in allowed_emails:
+            return True
+        if allowed_domain:
+            user_domain = user_email.split("@")[-1].lower() if "@" in user_email else ""
+            if user_domain == allowed_domain.lower():
+                return True
+        # If no explicit restriction was set on chunk, allow access
+        return not allowed_emails and not allowed_domain
+
     def __init__(self, db_path: str | Path | None = None) -> None:
         self.db_path = Path(db_path) if db_path else _DEFAULT_DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -243,6 +261,11 @@ class EmbeddedVectorStore:
         # Vectorized batch cosine similarity
         scored_chunks: list[tuple[float, DocumentChunk]] = []
         for r in rows:
+            emails = json.loads(r["allowed_emails"]) if r["allowed_emails"] else []
+            domain = r["allowed_domain"]
+            if user_email and not self._check_user_permission(user_email, emails, domain):
+                continue
+
             raw_blob = r["embedding"]
             chunk_vec = np.frombuffer(raw_blob, dtype=np.float32)
             c_norm = np.linalg.norm(chunk_vec)
@@ -329,6 +352,11 @@ class EmbeddedVectorStore:
 
         results: list[DocumentChunk] = []
         for r in rows:
+            emails = json.loads(r["allowed_emails"]) if r["allowed_emails"] else []
+            domain = r["allowed_domain"]
+            if user_email and not self._check_user_permission(user_email, emails, domain):
+                continue
+
             raw_blob = r["embedding"]
             emb = np.frombuffer(raw_blob, dtype=np.float32).tolist() if raw_blob else None
             emails = json.loads(r["allowed_emails"]) if r["allowed_emails"] else []

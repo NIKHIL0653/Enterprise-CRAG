@@ -196,3 +196,60 @@ async def test_embedded_store_delete_document(temp_store: EmbeddedVectorStore) -
 
     sparse_after = await temp_store.sparse_search("scratch content", top_k=5)
     assert len(sparse_after) == 0
+
+
+@pytest.mark.asyncio
+async def test_embedded_store_acl_user_permission_filtering(temp_store: EmbeddedVectorStore) -> None:
+    """Validate that chunks are filtered by user_email ACLs."""
+    await temp_store.upsert_document(doc_id="doc_hr", title="HR Confidential")
+    await temp_store.upsert_chunks([
+        DocumentChunk(
+            chunk_id="c_hr_confidential",
+            doc_id="doc_hr",
+            doc_title="HR Confidential",
+            source_url="",
+            content="Executive compensation and executive bonuses list.",
+            token_count=10,
+            chunk_index=0,
+            allowed_emails=["hr_director@example.com"],
+            allowed_domain="executive.example.com",
+            embedding=[0.9, 0.1, 0.0, 0.0],
+        ),
+        DocumentChunk(
+            chunk_id="c_general_policy",
+            doc_id="doc_hr",
+            doc_title="HR Confidential",
+            source_url="",
+            content="General holiday calendar for all employees.",
+            token_count=8,
+            chunk_index=1,
+            allowed_emails=[],
+            allowed_domain=None,
+            embedding=[0.9, 0.1, 0.0, 0.0],
+        ),
+    ])
+
+    # 1. Unauthorized user should only see general chunk
+    unauth_results = await temp_store.dense_search(
+        query_vector=[0.9, 0.1, 0.0, 0.0],
+        top_k=5,
+        user_email="intern@example.com",
+    )
+    assert len(unauth_results) == 1
+    assert unauth_results[0].chunk_id == "c_general_policy"
+
+    # 2. Authorized email should see both chunks
+    auth_results = await temp_store.dense_search(
+        query_vector=[0.9, 0.1, 0.0, 0.0],
+        top_k=5,
+        user_email="hr_director@example.com",
+    )
+    assert len(auth_results) == 2
+
+    # 3. Authorized domain should see both chunks
+    domain_results = await temp_store.dense_search(
+        query_vector=[0.9, 0.1, 0.0, 0.0],
+        top_k=5,
+        user_email="cfo@executive.example.com",
+    )
+    assert len(domain_results) == 2
