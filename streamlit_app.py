@@ -1074,7 +1074,39 @@ with tab_evals:
             st.metric(label="Benchmark Cost", value=f"${tot_cost:.6f}", help=f"Total tokens consumed: {tot_tok}")
 
         st.markdown("<hr style='margin: 1rem 0;'>", unsafe_allow_html=True)
-        st.markdown("<div style='font-size:0.85rem; font-weight:600; color:#0f172a; margin-bottom:0.5rem;'>Detailed Test Case Breakdown</div>", unsafe_allow_html=True)
+        col_hdr, col_dl = st.columns([3, 1])
+        with col_hdr:
+            st.markdown("<div style='font-size:0.85rem; font-weight:600; color:#0f172a; margin-top:0.4rem;'>Detailed Test Case Breakdown</div>", unsafe_allow_html=True)
+        with col_dl:
+            # Generate markdown audit report
+            report_lines = [
+                "# WorkspaceRAG Benchmark Evaluation Audit Report",
+                f"**Date:** {st.session_state.get('eval_timestamp', 'N/A')}",
+                f"**Overall Faithfulness:** {avg_faith*100:.1f}%",
+                f"**Overall Answer Relevance:** {avg_rel*100:.1f}%",
+                f"**Average Latency:** {round(avg_lat)} ms",
+                f"**Total Cost:** ${tot_cost:.6f} ({tot_tok} tokens)",
+                "",
+                "## Test Case Details",
+            ]
+            for r in res:
+                report_lines.extend([
+                    f"### [{'PASS' if r['passed'] else 'FAIL'}] {r['question']}",
+                    f"- **Category:** {r['category']}",
+                    f"- **Faithfulness:** {r['faithfulness']:.2f} | **Relevance:** {r['relevance']:.2f}",
+                    f"- **Latency:** {round(r['latency_ms'])}ms | **Tokens:** {r['tokens']} | **Cost:** ${r['cost_usd']:.6f}",
+                    f"- **Ground Truth:** {r['ground_truth']}",
+                    f"- **Answer:** {r['answer']}",
+                    "",
+                ])
+            report_content = "\n".join(report_lines)
+            st.download_button(
+                label="📥 Export Report (.md)",
+                data=report_content,
+                file_name=f"rag_benchmark_audit_{int(time.time())}.md",
+                mime="text/markdown",
+                use_container_width=True,
+            )
 
         for _i, item in enumerate(res):
             badge_color = "#15803d" if item["passed"] else "#b91c1c"
