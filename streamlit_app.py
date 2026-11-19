@@ -577,11 +577,23 @@ with tab_chat:
                         title = c.get("doc_title", "Document")
                         url = c.get("source_url", "")
                         sec = c.get("section_header")
-                        sec_str = f" - Section: {sec}" if sec else ""
+                        sec_str = f" · **Section:** {sec}" if sec else ""
+                        score = c.get("relevance_score")
+                        score_str = f" · **Score:** `{score:.2f}`" if isinstance(score, (int, float)) else ""
+                        excerpt = c.get("excerpt", "")
+
                         if url:
-                            st.markdown(f"- [{title}]({url}){sec_str}")
+                            st.markdown(f"📄 **[{title}]({url})**{sec_str}{score_str}")
                         else:
-                            st.markdown(f"- {title}{sec_str}")
+                            st.markdown(f"📄 **{title}**{sec_str}{score_str}")
+
+                        if excerpt:
+                            st.markdown(
+                                f"""<div style="background-color: #f1f5f9; padding: 6px 10px; border-left: 3px solid #6366f1; border-radius: 4px; font-size: 0.78rem; color: #334155; margin-bottom: 8px;">
+                                {excerpt.strip()}
+                                </div>""",
+                                unsafe_allow_html=True
+                            )
             if "meta" in msg and msg["meta"]:
                 meta = msg["meta"]
                 latency = meta.get("latency_ms")
@@ -823,18 +835,30 @@ if prompt:
         cleaned_final_answer = clean_text(full_raw_text)
         message_placeholder.markdown(cleaned_final_answer)
 
-        # Show citations cleanly
+        # Show citations cleanly with rich excerpts and relevance badges
         if citations:
-            with st.expander("Sources", expanded=False):
+            with st.expander("📚 Sources & Grounding References", expanded=False):
                 for c in citations:
                     title = c.get("doc_title", "Document")
                     url = c.get("source_url", "")
                     sec = c.get("section_header")
-                    sec_str = f" - Section: {sec}" if sec else ""
+                    sec_str = f" · **Section:** {sec}" if sec else ""
+                    score = c.get("relevance_score")
+                    score_str = f" · **Score:** `{score:.2f}`" if isinstance(score, (int, float)) else ""
+                    excerpt = c.get("excerpt", "")
+
                     if url:
-                        st.markdown(f"- [{title}]({url}){sec_str}")
+                        st.markdown(f"📄 **[{title}]({url})**{sec_str}{score_str}")
                     else:
-                        st.markdown(f"- {title}{sec_str}")
+                        st.markdown(f"📄 **{title}**{sec_str}{score_str}")
+
+                    if excerpt:
+                        st.markdown(
+                            f"""<div style="background-color: #f1f5f9; padding: 6px 10px; border-left: 3px solid #6366f1; border-radius: 4px; font-size: 0.78rem; color: #334155; margin-bottom: 8px;">
+                            {excerpt.strip()}
+                            </div>""",
+                            unsafe_allow_html=True
+                        )
 
         # Show telemetry badge
         if meta_payload:
