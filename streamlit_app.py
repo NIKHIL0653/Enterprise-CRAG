@@ -938,6 +938,11 @@ with tab_evals:
             except Exception as e:
                 st.error(f"Failed to parse custom JSONL: {e}")
 
+        if "custom_eval_samples" in st.session_state:
+            if st.button("Reset to Default Golden Dataset", use_container_width=True):
+                del st.session_state["custom_eval_samples"]
+                st.rerun()
+
     # Use custom samples if loaded, otherwise fallback to golden dataset
     active_eval_samples = st.session_state.get("custom_eval_samples", eval_samples)
     dataset_label = "custom dataset" if "custom_eval_samples" in st.session_state else "`golden_dataset.jsonl`"
